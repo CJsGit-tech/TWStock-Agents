@@ -90,7 +90,7 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
 @app.post("/api/financial-analysis/stream")
 async def financial_analysis_stream(request: FinancialAnalysisRequest) -> StreamingResponse:
     return StreamingResponse(
-        stream_financial_analysis_events(request.stock),
+        stream_financial_analysis_events(request.stock, request.question, request.context),
         media_type="application/x-ndjson",
         headers={
             "Cache-Control": "no-cache",
@@ -168,7 +168,11 @@ async def stream_agent_events(messages: list[ChatMessage]) -> AsyncIterator[str]
         yield encode_event("error", {"message": str(exc)})
 
 
-async def stream_financial_analysis_events(stock: str) -> AsyncIterator[str]:
+async def stream_financial_analysis_events(
+    stock: str,
+    question: str | None = None,
+    context: str | None = None,
+) -> AsyncIterator[str]:
     if not os.getenv("OPENAI_API_KEY"):
         yield encode_event(
             "error",
@@ -191,7 +195,7 @@ async def stream_financial_analysis_events(stock: str) -> AsyncIterator[str]:
                     },
                 )
 
-            async for event in run_financial_analysis(stock, mcp_servers):
+            async for event in run_financial_analysis(stock, mcp_servers, question=question, context=context):
                 yield encode_event(event["type"], event["payload"])
 
             yield encode_event("done", {})

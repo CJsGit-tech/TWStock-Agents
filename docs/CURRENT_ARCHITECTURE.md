@@ -11,16 +11,32 @@ This project currently runs a Docker Compose based MCP chatbot with Python FastM
 
 The frontend streams assistant text into the chat bubble while showing reasoning and tool events in a right-side event history panel grouped by chat round.
 
-The backend also exposes a financial-analysis workflow where task-specific OpenAI Agents SDK specialists use WebSearch, ImageGeneration, and existing MCP tools to produce Traditional Chinese stock reports.
+The backend exposes a financial-analysis workflow with code-owned orchestration, one analyst agent, and one optional visualization agent. FastAPI preserves the user's question and recent context, selects requested analysis sections with deterministic rules, fetches low-cost MCP stock data, then asks `FinancialAnalysisAgent` to interpret the data. If the user asks for a chart/image, `FinancialVisualizationAgent` receives the numerical context and uses `ImageGenerationTool` to create an image shown in chat.
 
-## Key Architecture Decision
+## Key Architecture Decisions
 
-Use Python FastMCP for MCP servers:
+### MCP Servers: Python FastMCP
 
-- It keeps MCP tool implementation in the same language family as `chat-api`.
-- It is faster to extend for future stock-research tools and data-provider integrations.
-- It supports network-based streamable HTTP MCP transport for Docker Compose deployments.
-- SSE can remain a legacy compatibility option, but streamable HTTP should be the default for new services.
+- Same language family as `chat-api`.
+- Faster to extend for future stock-research tools.
+- Supports network-based streamable HTTP MCP transport for Docker Compose.
+- SSE remains a legacy compatibility option; streamable HTTP is the default.
+
+### Financial Analysis: Code-Owned Planner + One Analyst Agent
+
+- `chat-api` owns request parsing, section dispatch, deterministic data collection, and stream event normalization.
+- `FinancialAnalysisAgent` owns interpretation and answer writing.
+- `FinancialVisualizationAgent` owns chart/image generation when the request asks for visualization.
+- The workflow preserves the original user question instead of converting every request into a fixed full-report prompt.
+- The backend selects sections such as `valuation`, `growth`, `technical`, `peers`, or `cashflow` using explicit regex rules in `financial_agents/orchestrator.py`.
+- The backend calls MCP tools directly for common structured data before invoking the model.
+- This replaces the previous many-specialist A2A manager model and avoids fragile tool-output-to-agent attribution.
+
+Benefits over the previous many-agent architecture:
+- Lower latency and cost from fewer model calls.
+- Easier debugging because routing and data collection are visible Python code.
+- Selective prompts are deterministic.
+- Prompt ownership is simpler because only one runtime analyst prompt is active.
 
 ## System Diagram
 
@@ -38,64 +54,85 @@ flowchart LR
     openai[OpenAI API]
 
     user -->|Open app| web
-    web -->|POST /api/chat/stream<br/>NDJSON response stream| api
+    web -->|POST /api/chat/stream<br/>chat NDJSON stream| api
+    web -->|POST /api/financial-analysis/stream<br/>financial NDJSON stream| api
     api -->|MCP streamable HTTP<br/>/mcp| arithmetic
     api -->|MCP streamable HTTP<br/>/mcp| twstock
-    api -->|Financial specialist agents<br/>WebSearch + ImageGeneration| openai
+    api -->|FinancialAnalysisAgent + optional<br/>FinancialVisualizationAgent| openai
     api -->|Model request + streaming events| openai
     openai -->|Text, reasoning, tool orchestration events| api
     arithmetic -->|Tool results<br/>addition/subtraction/multiplication/divide| api
     twstock -->|Taiwan stock metadata, quotes,<br/>historical data, moving averages, signals| api
-    api -->|text_delta, reasoning_event,<br/>tool_called, tool_output, error| web
+    api -->|text_delta, reasoning_event,<br/>tool_called, tool_output,<br/>agent_started, error| web
     web -->|Assistant bubble + event panel| user
 ```
 
-## Financial Analysis Skilled Agents
+## Financial Analysis Architecture
 
 ```mermaid
 flowchart TB
-    request[POST /api/financial-analysis/stream<br/>stock: 2330 or 台積電]
-    orchestrator[FinancialReportOrchestrator]
-
-    company[CompanyOverviewAgent]
-    health[FinancialHealthAgent]
-    growth[GrowthMomentumAgent]
-    valuation[ValuationStateAgent]
-    cashflow[CashFlowStructureAgent]
-    peers[PeerComparisonAgent]
-    sixway[SixWayPEValuationAgent]
-    entry[EntryStrategyAgent]
-    visual[VisualSummaryAgent]
+    request[POST /api/financial-analysis/stream<br/>stock + question]
+    parser[Request parser<br/>normalize stock + infer sections]
+    collector[Data collector<br/>direct MCP tool calls]
+    analyst[FinancialAnalysisAgent<br/>single OpenAI agent]
+    visual[FinancialVisualizationAgent<br/>ImageGenerationTool]
 
     websearch[OpenAI WebSearchTool]
     imagegen[OpenAI ImageGenerationTool]
     mcp[twstock MCP tools]
-    final[Traditional Chinese report<br/>tables + summary + disclaimer]
+    final[Financial analysis response]
+    image[Generated chart image]
 
-    request --> orchestrator
-    orchestrator --> company
-    orchestrator --> health
-    orchestrator --> growth
-    orchestrator --> valuation
-    orchestrator --> cashflow
-    orchestrator --> peers
-    orchestrator --> sixway
-    company --> websearch
-    company --> mcp
-    health --> websearch
-    growth --> websearch
-    valuation --> websearch
-    valuation --> mcp
-    cashflow --> websearch
-    peers --> websearch
-    sixway --> websearch
-    orchestrator --> entry
-    orchestrator --> final
-    orchestrator --> visual
+    request --> parser
+    parser --> collector
+    collector --> mcp
+    collector --> analyst
+    parser --> analyst
+    analyst --> websearch
+    analyst --> mcp
+    analyst --> final
+    collector --> visual
+    parser --> visual
     visual --> imagegen
+    visual --> image
 ```
 
-## Request And Event Flow
+### Financial Flow Detail
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant W as chat-web
+    participant A as chat-api
+    participant C as Data Collector
+    participant F as FinancialAnalysisAgent
+    participant V as FinancialVisualizationAgent
+    participant O as OpenAI API
+    participant T as twstock-mcp-fastmcp
+
+    U->>W: Request financial analysis for 2330
+    W->>A: POST /api/financial-analysis/stream with stock + question
+    A->>A: Normalize stock and infer requested sections
+    A->>C: Collect structured data for the plan
+    C->>T: get_stock_info / quote / history / MA as needed
+    T-->>C: Structured MCP data
+    C-->>A: collected_data
+    A->>F: Create one analyst agent with prompt templates
+    F->>O: Interpret question + plan + collected data
+    O-->>F: Stream response and tool events
+    F-->>A: text_delta / reasoning / tool events
+    opt User asked for chart/image
+        A->>V: Send question + recent context + numerical data
+        V->>O: Generate image with ImageGenerationTool
+        O-->>V: image_generation_call result
+        V-->>A: image_generated event
+    end
+    A-->>W: NDJSON stream
+    W-->>U: Render answer + event history
+```
+
+## Request And Event Flow (Chat)
 
 ```mermaid
 sequenceDiagram
@@ -146,9 +183,9 @@ sequenceDiagram
 | --- | --- | --- |
 | `GET /` | `chat-web` | Serves the React application. |
 | `GET /api/health` | `chat-api` | Backend health check. |
-| `GET /api/mcp/tools` | `chat-api` | Lists tools discovered from the MCP server. |
+| `GET /api/mcp/tools` | `chat-api` | Lists tools discovered from both configured MCP servers. |
 | `POST /api/chat/stream` | `chat-api` | Main chatbot endpoint; returns newline-delimited JSON events. |
-| `POST /api/financial-analysis/stream` | `chat-api` | Runs skilled financial-analysis agents for one stock and streams normalized NDJSON events. |
+| `POST /api/financial-analysis/stream` | `chat-api` | Parses `stock`, optional `question`, and optional recent `context`; collects relevant MCP data; runs `FinancialAnalysisAgent`; optionally runs `FinancialVisualizationAgent`; and streams normalized NDJSON events. |
 | `GET /healthz` | `arithmetic-mcp-fastmcp` | MCP server health check exposed by the container app. |
 | `/mcp` | `arithmetic-mcp-fastmcp` | FastMCP streamable HTTP transport endpoint. |
 | `GET /healthz` | `twstock-mcp-fastmcp` | Taiwan stock MCP server health check. |
@@ -216,7 +253,7 @@ The `twstock-mcp-fastmcp` service wraps the public `twstock` Python package.
 
 ## Event Contract
 
-`chat-api` emits one JSON object per line from `POST /api/chat/stream`.
+`chat-api` emits one JSON object per line from both `POST /api/chat/stream` and `POST /api/financial-analysis/stream`.
 
 The frontend renders these events:
 
@@ -235,10 +272,54 @@ The frontend intentionally ignores these events in the event history:
 
 Financial-analysis streams additionally emit:
 
-- `agent_started`: a skilled agent has started its section.
-- `agent_completed`: a skilled agent completed its section.
-- `source_found`: a specialist returned a cited source URL.
-- `image_generated`: the visual summary agent completed an image-generation step.
+- `agent_started`: emitted for the code-owned financial orchestrator and the single `FinancialAnalysisAgent`.
+- `agent_started`: also emitted for `FinancialVisualizationAgent` when an image/chart is requested.
+- `agent_completed`: emitted when the financial analysis or visualization agent finishes.
+- `tool_called`: emitted both for deterministic backend MCP collection and model-requested tools.
+- `tool_output`: emitted for deterministic backend MCP results and model-requested tool outputs.
+- `image_generated`: emitted with `image.b64_json` and `image.image_url` when `FinancialVisualizationAgent` generates a chart.
+
+## Financial Analysis Request Handling
+
+The frontend chooses the financial endpoint when a prompt matches financial keywords such as `財務`, `合理價`, `本益比`, `估值`, `同業`, `現金流`, `分批`, or `完整分析`.
+
+For financial requests, the frontend sends:
+
+```json
+{
+  "stock": "2330",
+  "question": "請為股票 2330 台積電產生完整的財務分析報告...",
+  "context": "Recent visible chat transcript, used for follow-up chart requests."
+}
+```
+
+The backend request model accepts both fields and passes both into `run_financial_analysis()`. The orchestrator:
+
+- Normalizes the stock input.
+- Preserves the original question.
+- Infers requested sections with explicit regex rules.
+- Collects relevant MCP data before calling the model.
+- Renders the final model prompt from `financial_agents/prompts/financial_analysis_input.md`.
+
+## Prompt Management
+
+Financial prompts are stored as versioned markdown templates under `backend/financial_agents/prompts/` and loaded through `financial_agents/prompt_store.py`.
+
+| Prompt key | File | Runtime use |
+| --- | --- | --- |
+| `financial_analysis.instructions` | `financial_analysis_instructions.md` | System instructions for `FinancialAnalysisAgent`. |
+| `financial_analysis.input` | `financial_analysis_input.md` | Backend-rendered model input containing question, stock, selected sections, and collected data. |
+| `financial_visualization.instructions` | `financial_visualization_instructions.md` | System instructions for `FinancialVisualizationAgent`. |
+| `financial_visualization.input` | `financial_visualization_input.md` | Backend-rendered image prompt containing question, recent context, and numerical data. |
+| `manager_dispatch.instructions` | `manager_dispatch_instructions.md` | Governance document for dispatch policy and future LLM planner work; current dispatch is Python code. |
+
+Prompt management rules:
+
+- Keep long instruction text out of Python modules.
+- Use stable prompt keys and explicit `PromptSpec.version` values.
+- Treat Python dispatch rules as the source of truth for current routing.
+- Use markdown prompt files for reviewable changes.
+- Override a prompt file path with `FINANCIAL_PROMPT_<PROMPT_KEY>` environment variables when testing variants, for example `FINANCIAL_PROMPT_FINANCIAL_ANALYSIS_INSTRUCTIONS=/path/to/prompt.md`.
 
 ## Chat Round Memory
 
@@ -277,7 +358,8 @@ Financial-analysis options:
 ```sh
 FINANCIAL_ANALYSIS_MODEL="gpt-5-mini"
 FINANCIAL_ANALYSIS_WEB_CONTEXT="medium"
-ENABLE_FINANCIAL_IMAGE="true"
+OPENAI_IMAGE_MODEL="gpt-image-1"
+OPENAI_IMAGE_QUALITY="low"
 ```
 
 `chat-api` connects to the FastMCP servers inside the Compose network with:
@@ -317,6 +399,10 @@ services:
       - "8000:8000"
     environment:
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5-mini}
+      FINANCIAL_ANALYSIS_MODEL: ${FINANCIAL_ANALYSIS_MODEL:-gpt-5-mini}
+      FINANCIAL_ANALYSIS_WEB_CONTEXT: ${FINANCIAL_ANALYSIS_WEB_CONTEXT:-medium}
+      OPENAI_IMAGE_MODEL: ${OPENAI_IMAGE_MODEL:-gpt-image-1}
+      OPENAI_IMAGE_QUALITY: ${OPENAI_IMAGE_QUALITY:-low}
       MCP_HTTP_URL: http://arithmetic-mcp-fastmcp:8080/mcp
       TWSTOCK_MCP_HTTP_URL: http://twstock-mcp-fastmcp:8081/mcp
       CORS_ALLOW_ORIGINS: "*"
@@ -373,7 +459,7 @@ MCP runtime ownership is now Python FastMCP:
 - `twstock-mcp-fastmcp` is the Taiwan stock MCP service in Compose.
 - `./mcp-arithmetic` owns arithmetic tool implementation.
 - `./mcp-twstock` owns Taiwan stock tool implementation.
-- `chat-api` remains the OpenAI Agents SDK orchestrator.
+- `chat-api` owns request parsing, MCP data collection, prompt rendering, and OpenAI Agents SDK execution.
 - `chat-web` remains the streaming chat and event-history UI.
 - Prefer streamable HTTP at `/mcp` for new MCP clients.
 - Only add SSE if a legacy MCP client requires it.

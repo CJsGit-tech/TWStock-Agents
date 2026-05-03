@@ -310,6 +310,18 @@ h1 {
   background: var(--bg-surface);
 }
 
+.image-download {
+  width: fit-content;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.image-download:hover {
+  text-decoration: underline;
+}
+
 .image-attachment small {
   display: block;
   max-height: 140px;

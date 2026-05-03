@@ -10,6 +10,7 @@ DISCLAIMER = "投資有風險，以上為財務觀點分析，不構成投資建
 class FinancialAnalysisRequest(BaseModel):
     stock: str = Field(..., min_length=1)
     question: str | None = None
+    context: str | None = None
 
 
 class Source(BaseModel):

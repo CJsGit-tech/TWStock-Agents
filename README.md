@@ -1,6 +1,6 @@
 # TWStock Agents
 
-Docker Compose app for MCP-backed arithmetic tools, Taiwan stock tools, and skilled financial-analysis agents.
+Docker Compose app for MCP-backed arithmetic tools, Taiwan stock tools, and a streamlined financial-analysis workflow.
 
 Identifiable MCP server name: `arithmetic-mcp-fastmcp`
 
@@ -43,7 +43,8 @@ OPENAI_API_KEY="..."
 OPENAI_MODEL="gpt-5-mini"
 FINANCIAL_ANALYSIS_MODEL="gpt-5-mini"
 FINANCIAL_ANALYSIS_WEB_CONTEXT="medium"
-ENABLE_FINANCIAL_IMAGE="true"
+OPENAI_IMAGE_MODEL="gpt-image-1"
+OPENAI_IMAGE_QUALITY="low"
 ```
 
 Only `OPENAI_API_KEY` is required. The other variables are optional.
@@ -82,30 +83,26 @@ The Compose stack starts four services:
 - `chat-api`: Python FastAPI bridge using the OpenAI Agents SDK and the MCP server.
 - `chat-web`: React/Vite chatbot UI that streams reasoning, tool, and text events.
 
-## Financial Analysis Agents
+## Financial Analysis Workflow
 
-The backend exposes a skilled-agent workflow for Traditional Chinese stock analysis:
+The backend exposes a financial-analysis workflow with code-owned request parsing, MCP data collection, and one `FinancialAnalysisAgent`:
 
 ```sh
 curl -N http://localhost:8000/api/financial-analysis/stream \
   -H "Content-Type: application/json" \
-  -d '{"stock":"2330"}'
+  -d '{"stock":"2330","question":"Analyze valuation and growth for 2330."}'
 ```
 
-Specialists include:
+The workflow:
 
-- `CompanyOverviewAgent`
-- `FinancialHealthAgent`
-- `GrowthMomentumAgent`
-- `ValuationStateAgent`
-- `CashFlowStructureAgent`
-- `PeerComparisonAgent`
-- `EntryStrategyAgent`
-- `SixWayPEValuationAgent`
-- `VisualSummaryAgent`
-- `FinancialReportOrchestrator`
+- Normalizes the stock input.
+- Preserves the original question.
+- Infers requested sections in backend code.
+- Collects common structured data through MCP tools.
+- Streams one analyst agent response.
+- Runs `FinancialVisualizationAgent` with `ImageGenerationTool` when the user asks for a chart/image from the stock data.
 
-The stream emits `agent_started`, `agent_completed`, `source_found`, `tool_called`, `tool_output`, `text_delta`, `image_generated`, `error`, and `done`.
+The stream emits `agent_started`, `agent_completed`, `reasoning_event`, `tool_called`, `tool_output`, `text_delta`, `image_generated`, `error`, and `done`.
 
 ## Run The MCP Server Directly
 

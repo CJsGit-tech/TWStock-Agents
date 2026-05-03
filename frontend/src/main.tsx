@@ -71,19 +71,38 @@ const TUTORIAL_STORAGE_KEY = "mcpChatTutorialDismissed";
 const GUIDED_EXAMPLES: GuidedExample[] = [
   {
     id: "financial-full-analysis",
-    title: "Financial analysis report",
-    summary: "Run the skilled financial agents for a complete Traditional Chinese report.",
+    title: "Financial analysis",
+    summary: "The backend selects the requested sections, collects stock data, and asks one analyst agent to respond.",
     prompts: [
       {
         label: "Full financial report",
-        category: "Financial Agents",
-        prompt: "完整分析 2330 台積電的財務體質與合理價。",
+        category: "Financial Analyst",
+        prompt: "請為股票 2330 台積電產生完整的財務分析報告，包含公司概要、財務體質、成長動能、估值、現金流、同業比較、六種本益比估值與買進策略。",
         workflow: "financial",
       },
       {
-        label: "Six-way PE valuation",
-        category: "Financial Agents",
-        prompt: "估算 2330 的本益比合理價，並給我六種估值表。",
+        label: "Focused valuation only",
+        category: "Financial Analyst",
+        prompt: "只分析 2454 聯發科的估值狀態與六種本益比合理價，不需要其他段落。",
+        workflow: "financial",
+      },
+    ],
+  },
+  {
+    id: "selective-analysis",
+    title: "Selective analysis",
+    summary: "Ask for just two dimensions and the backend narrows the analysis scope.",
+    prompts: [
+      {
+        label: "Health + growth only",
+        category: "Financial Analyst",
+        prompt: "只看 2330 台積電的財務體質達標狀態和成長動能，其他不用分析。",
+        workflow: "financial",
+      },
+      {
+        label: "Add peer comparison",
+        category: "Financial Analyst",
+        prompt: "再幫我加上 2330 的同業比較分析。",
         workflow: "financial",
       },
     ],
@@ -122,41 +141,24 @@ const GUIDED_EXAMPLES: GuidedExample[] = [
       },
     ],
   },
-  {
-    id: "stock-analysis",
-    title: "Taiwan stock analysis",
-    summary: "Calculate a moving average, then ask for a Best Four Point signal.",
-    prompts: [
-      {
-        label: "Moving average",
-        category: "Taiwan Stocks",
-        prompt: "計算 2330 最近收盤價的 5 日移動平均。",
-      },
-      {
-        label: "Best Four Point",
-        category: "Taiwan Stocks",
-        prompt: "幫我分析 2330 的四大買賣點訊號。",
-      },
-    ],
-  },
 ];
 
 const TUTORIAL_STEPS: TutorialStep[] = [
   {
     title: "Pick a guided example",
-    body: "Click a sample question to submit it immediately through the chat stream.",
+    body: "Click a sample question to submit it. The backend will choose the requested analysis sections.",
   },
   {
-    title: "Watch the answer stream",
-    body: "Assistant text appears directly in the chat bubble as the model responds.",
+    title: "Watch the workflow",
+    body: "The backend collects structured stock data, then streams one analyst agent's response.",
   },
   {
-    title: "Review tool activity",
-    body: "Specialist agents, tool calls, tool outputs, and reasoning events are grouped by round in the event history.",
+    title: "Review aggregated results",
+    body: "The analyst uses the collected data and available tools to answer the specific question.",
   },
   {
-    title: "Continue with the next prompt",
-    body: "After the response completes, use the suggested second question to try a different MCP or financial-agent capability.",
+    title: "Try a selective analysis",
+    body: "Ask for only specific dimensions and the request parser will narrow the scope.",
   },
 ];
 
@@ -165,7 +167,7 @@ function App() {
     {
       id: crypto.randomUUID(),
       role: "assistant",
-      content: "Ask me to calculate something or look up a Taiwan stock. I will route work through FastMCP tools.",
+      content: "Ask me to run a financial analysis, calculate something, or look up a Taiwan stock.",
     },
   ]);
   const [input, setInput] = useState("");
@@ -403,9 +405,9 @@ function App() {
           <div>
             <div className="eyebrow">
               <Server size={13} />
-              FastMCP Tools
+              Financial Analyst + FastMCP Tools
             </div>
-            <h1>Arithmetic + Taiwan Stocks</h1>
+            <h1>Financial Analysis · Arithmetic · Taiwan Stocks</h1>
           </div>
           <div className="topbar-actions">
             <button className="guide-button" type="button" onClick={showGuide}>
@@ -430,6 +432,11 @@ function App() {
                     <div className="image-attachment" key={`${message.id}-${image.title}`}>
                       <strong>{image.title}</strong>
                       {image.imageUrl ? <img src={image.imageUrl} alt={image.title} /> : null}
+                      {image.imageUrl ? (
+                        <a className="image-download" href={image.imageUrl} download={`${safeFileName(image.title)}.png`}>
+                          Download image
+                        </a>
+                      ) : null}
                       {image.description ? <small>{image.description}</small> : null}
                     </div>
                   ))}
@@ -746,8 +753,9 @@ function endpointForWorkflow(workflow: Workflow): string {
 function payloadForWorkflow(workflow: Workflow, prompt: string, messages: Message[]) {
   if (workflow === "financial") {
     return {
-      stock: extractStockInput(prompt),
+      stock: extractStockInput(prompt, messages),
       question: prompt,
+      context: financialContext(messages),
     };
   }
 
@@ -759,12 +767,35 @@ function payloadForWorkflow(workflow: Workflow, prompt: string, messages: Messag
 }
 
 function inferWorkflow(prompt: string): Workflow {
-  return /財務|合理價|本益比|估值|同業|現金流|分批|完整分析/.test(prompt) ? "financial" : "chat";
+  return /財務|合理價|本益比|估值|同業|現金流|分批|完整分析|圖表|視覺化|畫.*圖|生成.*圖|chart|visual|visualize|graph|plot|image/i.test(prompt) ? "financial" : "chat";
 }
 
-function extractStockInput(prompt: string): string {
-  const match = prompt.match(/\b\d{4,6}\b/);
-  return match?.[0] ?? prompt;
+function extractStockInput(prompt: string, messages: Message[] = []): string {
+  const directMatch = prompt.match(/\b\d{4,6}\b/);
+  if (directMatch) {
+    return directMatch[0];
+  }
+
+  for (const message of [...messages].reverse()) {
+    const match = message.content.match(/\b\d{4,6}\b/);
+    if (match) {
+      return match[0];
+    }
+  }
+
+  return prompt;
+}
+
+function financialContext(messages: Message[]): string {
+  return messages
+    .filter((message) => message.content.trim())
+    .slice(-6)
+    .map((message) => `${message.role.toUpperCase()}: ${message.content}`)
+    .join("\n\n");
+}
+
+function safeFileName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/gi, "-").replace(/^-+|-+$/g, "") || "financial-visualization";
 }
 
 function imageUrlFromPayload(value: unknown): string | undefined {

@@ -1,7 +1,9 @@
-import asyncio
+from __future__ import annotations
+
 import json
-import os
-from collections.abc import AsyncIterator, Callable
+import re
+from collections.abc import AsyncIterator
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any
 
 from agents import Runner
@@ -13,170 +15,272 @@ from openai.types.responses import (
     ResponseTextDeltaEvent,
 )
 
-from .agents import (
-    cashflow_structure_agent,
-    company_overview_agent,
-    entry_strategy_agent,
-    financial_health_agent,
-    growth_momentum_agent,
-    peer_comparison_agent,
-    report_synthesis_agent,
-    six_way_pe_valuation_agent,
-    valuation_state_agent,
-    visual_summary_agent,
-)
-from .schemas import DISCLAIMER, SpecialistResult, normalize_stock_input
-
-StreamPayload = dict[str, Any]
-EventSink = Callable[[str, StreamPayload], None]
+from .agents import financial_analysis_agent, financial_visualization_agent
+from .prompt_store import render_prompt
+from .schemas import SpecialistResult, normalize_stock_input
 
 
-async def run_financial_analysis(stock: str, mcp_servers: list[MCPServer]) -> AsyncIterator[dict[str, Any]]:
-    normalized_stock = normalize_stock_input(stock)
-    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+@dataclass(frozen=True)
+class AnalysisPlan:
+    stock: str
+    question: str
+    sections: list[str]
+    context: str = ""
 
-    def emit(event_type: str, payload: StreamPayload) -> None:
-        queue.put_nowait({"type": event_type, "payload": payload})
 
-    emit("agent_started", {"agent": "FinancialReportOrchestrator", "detail": f"開始分析 {normalized_stock}"})
+SECTION_PATTERNS: list[tuple[str, str]] = [
+    ("overview", r"公司|概要|基本|產品|客戶|business|company|overview"),
+    ("quote", r"股價|即時|quote|price|current"),
+    ("technical", r"技術|均線|移動平均|四大|買賣點|歷史|OHLC|technical|moving average"),
+    ("valuation", r"估值|合理價|本益比|PE|PB|fair value|valuation"),
+    ("growth", r"成長|營收|EPS|動能|growth|momentum"),
+    ("financial_health", r"財務體質|毛利|營益|淨利|ROE|margin|health"),
+    ("cashflow", r"現金流|負債|庫存|cash ?flow|debt|inventory"),
+    ("peers", r"同業|比較|peer|competitor"),
+    ("entry_strategy", r"分批|買進|進場|entry|strategy"),
+    ("visualization", r"圖|圖表|視覺化|畫|chart|visual|visualize|image|graph|plot"),
+]
 
-    research_specs = [
-        ("company_overview", company_overview_agent(mcp_servers), overview_prompt(normalized_stock)),
-        ("financial_health", financial_health_agent(), financial_health_prompt(normalized_stock)),
-        ("growth_momentum", growth_momentum_agent(), growth_prompt(normalized_stock)),
-        ("valuation_state", valuation_state_agent(mcp_servers), valuation_prompt(normalized_stock)),
-        ("cashflow_structure", cashflow_structure_agent(), cashflow_prompt(normalized_stock)),
-        ("peer_comparison", peer_comparison_agent(), peer_prompt(normalized_stock)),
-        ("six_way_pe", six_way_pe_valuation_agent(), six_way_prompt(normalized_stock)),
-    ]
+DEFAULT_SECTIONS = ["overview", "quote", "valuation", "growth"]
+FULL_ANALYSIS_PATTERN = re.compile(r"完整|全部|全面|full|complete|report", re.IGNORECASE)
+ALL_SECTIONS = [name for name, _pattern in SECTION_PATTERNS if name != "visualization"]
 
-    tasks = [
-        asyncio.create_task(run_specialist(key, agent, prompt, emit))
-        for key, agent, prompt in research_specs
-    ]
 
-    pending = set(tasks)
-    results: dict[str, SpecialistResult] = {}
-    while pending:
-        done, pending = await asyncio.wait(pending, timeout=0.1, return_when=asyncio.FIRST_COMPLETED)
-        while not queue.empty():
-            yield await queue.get()
-        for task in done:
-            key, result = task.result()
-            results[key] = result
+async def run_financial_analysis(
+    stock: str,
+    mcp_servers: list[MCPServer],
+    question: str | None = None,
+    context: str | None = None,
+) -> AsyncIterator[dict[str, Any]]:
+    """Run the simplified financial workflow and yield NDJSON-compatible events."""
 
-    while not queue.empty():
-        yield await queue.get()
+    plan = build_analysis_plan(stock=stock, question=question, context=context)
 
-    entry_result = await run_specialist(
-        "entry_strategy",
-        entry_strategy_agent(),
-        entry_strategy_prompt(normalized_stock, results),
-        emit,
+    yield {
+        "type": "agent_started",
+        "payload": {
+            "agent": "FinancialAnalysisOrchestrator",
+            "detail": f"Planning analysis for {plan.stock}",
+        },
+    }
+    yield {
+        "type": "reasoning_event",
+        "payload": {
+            "event_type": "analysis_plan",
+            "data": {
+                "stock": plan.stock,
+                "question": plan.question,
+                "sections": plan.sections,
+                "has_context": bool(plan.context),
+            },
+        },
+    }
+
+    collected_data: dict[str, Any] = {}
+    async for event in collect_financial_data(plan, mcp_servers, collected_data):
+        yield event
+
+    yield {
+        "type": "agent_started",
+        "payload": {
+            "agent": "FinancialAnalysisAgent",
+            "detail": "Interpreting collected data",
+        },
+    }
+
+    agent = financial_analysis_agent(mcp_servers)
+    prompt = render_prompt(
+        "financial_analysis.input",
+        stock=plan.stock,
+        question=plan.question,
+        sections=", ".join(plan.sections),
+        collected_data=json.dumps(collected_data, ensure_ascii=False, indent=2),
     )
-    results[entry_result[0]] = entry_result[1]
-    while not queue.empty():
-        yield await queue.get()
 
-    synthesis_input = synthesis_prompt(normalized_stock, results)
-    emit("agent_started", {"agent": "FinancialReportOrchestrator", "detail": "整合專家輸出並產生最終報告"})
-    while not queue.empty():
-        yield await queue.get()
-
-    final_agent = report_synthesis_agent()
-    final_result = Runner.run_streamed(final_agent, input=synthesis_input, max_turns=8)
-    async for event in final_result.stream_events():
+    result = Runner.run_streamed(agent, input=prompt, max_turns=12)
+    async for event in result.stream_events():
         async for normalized in normalize_agent_event(event):
             yield normalized
 
-    emit("agent_completed", {"agent": "FinancialReportOrchestrator", "summary": "最終財務分析報告已完成"})
-    while not queue.empty():
-        yield await queue.get()
+    yield {
+        "type": "agent_completed",
+        "payload": {"agent": "FinancialAnalysisAgent", "summary": "Analysis response completed"},
+    }
 
-    if os.getenv("ENABLE_FINANCIAL_IMAGE", "true").lower() == "true":
-        async for image_event in run_visual_summary(normalized_stock, results):
-            yield image_event
-
-
-async def run_specialist(
-    key: str,
-    agent,
-    prompt: str,
-    emit: EventSink,
-) -> tuple[str, SpecialistResult]:
-    emit("agent_started", {"agent": agent.name, "detail": key})
-    try:
-        result = await Runner.run(agent, prompt, max_turns=8)
-        output = coerce_specialist_result(result.final_output)
-        emit("agent_completed", {"agent": agent.name, "summary": output.summary or "完成"})
-        for source in output.sources:
-            if source.url:
-                emit("source_found", {"agent": agent.name, "title": source.title, "url": source.url, "note": source.note})
-        return key, output
-    except Exception as exc:
-        fallback = SpecialistResult(
-            summary=f"{agent.name} 分析失敗：{exc}",
-            assumptions=["此段落需使用者稍後重試或改以人工來源補齊。"],
-            confidence="low",
-        )
-        emit("error", {"agent": agent.name, "message": str(exc)})
-        return key, fallback
+    if "visualization" in plan.sections:
+        async for event in run_financial_visualization(plan, collected_data):
+            yield event
 
 
-async def run_visual_summary(stock: str, results: dict[str, SpecialistResult]) -> AsyncIterator[dict[str, Any]]:
+def build_analysis_plan(
+    stock: str,
+    question: str | None = None,
+    context: str | None = None,
+) -> AnalysisPlan:
+    normalized_stock = normalize_stock_input(stock)
+    effective_question = (question or stock).strip() or normalized_stock
+    sections = infer_sections(effective_question)
+    effective_context = (context or "").strip()
+    if not normalized_stock.isdigit() and effective_context:
+        context_stock = normalize_stock_input(effective_context)
+        if context_stock.isdigit():
+            normalized_stock = context_stock
+    return AnalysisPlan(
+        stock=normalized_stock,
+        question=effective_question,
+        sections=sections,
+        context=effective_context,
+    )
+
+
+def infer_sections(question: str) -> list[str]:
+    if FULL_ANALYSIS_PATTERN.search(question):
+        return ALL_SECTIONS.copy()
+
+    sections = [
+        name
+        for name, pattern in SECTION_PATTERNS
+        if re.search(pattern, question, re.IGNORECASE)
+    ]
+    return sections or DEFAULT_SECTIONS.copy()
+
+
+async def collect_financial_data(
+    plan: AnalysisPlan,
+    mcp_servers: list[MCPServer],
+    collected_data: dict[str, Any],
+) -> AsyncIterator[dict[str, Any]]:
+    if not plan.stock.isdigit():
+        collected_data["note"] = "No numeric Taiwan stock code was detected; MCP stock lookups may be skipped."
+        return
+
+    tool_calls = ["get_stock_info", "get_realtime_quote"]
+    if "technical" in plan.sections or "visualization" in plan.sections:
+        tool_calls.extend(["get_historical_data", "calculate_moving_average", "analyze_best_four_point"])
+    elif any(section in plan.sections for section in ("valuation", "growth")):
+        tool_calls.append("get_historical_data")
+
+    for tool_name in dict.fromkeys(tool_calls):
+        args = mcp_args_for_tool(tool_name, plan.stock)
+        yield {
+            "type": "tool_called",
+            "payload": {"item": {"name": tool_name, "arguments": args, "source": "backend_data_collector"}},
+        }
+        try:
+            result = await call_mcp_tool(mcp_servers, tool_name, args)
+            collected_data[tool_name] = result
+            yield {"type": "tool_output", "payload": {"output": {tool_name: result}}}
+        except Exception as exc:
+            error = {"success": False, "error": str(exc)}
+            collected_data[tool_name] = error
+            yield {
+                "type": "tool_output",
+                "payload": {"output": {tool_name: error}},
+            }
+
+
+async def run_financial_visualization(
+    plan: AnalysisPlan,
+    collected_data: dict[str, Any],
+) -> AsyncIterator[dict[str, Any]]:
     yield {
         "type": "agent_started",
-        "payload": {"agent": "VisualSummaryAgent", "detail": "產生財務視覺摘要"},
+        "payload": {
+            "agent": "FinancialVisualizationAgent",
+            "detail": "Generating chart image from stock data",
+        },
     }
+
+    visualization_data = compact_visualization_data(collected_data)
+    prompt = render_prompt(
+        "financial_visualization.input",
+        stock=plan.stock,
+        question=plan.question,
+        sections=", ".join(plan.sections),
+        context=plan.context[-2500:],
+        visualization_data=json.dumps(visualization_data, ensure_ascii=False, indent=2),
+    )
+
     try:
-        result = await Runner.run(
-            visual_summary_agent(),
-            visual_prompt(stock, results),
-            max_turns=4,
-        )
-        summary = stringify_output(result.final_output)
+        result = await Runner.run(financial_visualization_agent(), prompt, max_turns=6)
+        image = extract_image_payload(result)
+        description = stringify_output(result.final_output)[:500]
+        if image:
+            yield {
+                "type": "image_generated",
+                "payload": {
+                    "agent": "FinancialVisualizationAgent",
+                    "title": f"{plan.stock} financial visualization",
+                    "description": description,
+                    "image": image,
+                },
+            }
+            yield {
+                "type": "agent_completed",
+                "payload": {"agent": "FinancialVisualizationAgent", "summary": "Visualization image completed"},
+            }
+            return
+
         yield {
-            "type": "image_generated",
+            "type": "error",
             "payload": {
-                "agent": "VisualSummaryAgent",
-                "title": f"{stock} 財務分析視覺摘要",
-                "description": summary,
-                "image": extract_image_payload(result),
+                "agent": "FinancialVisualizationAgent",
+                "message": "ImageGenerationTool completed without an extractable image payload.",
             },
-        }
-        yield {
-            "type": "agent_completed",
-            "payload": {"agent": "VisualSummaryAgent", "summary": "視覺摘要已完成"},
         }
     except Exception as exc:
         yield {
             "type": "error",
-            "payload": {"agent": "VisualSummaryAgent", "message": str(exc)},
+            "payload": {"agent": "FinancialVisualizationAgent", "message": str(exc)},
         }
 
 
-def coerce_specialist_result(value: Any) -> SpecialistResult:
-    if isinstance(value, SpecialistResult):
-        return value
+def compact_visualization_data(collected_data: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key, value in collected_data.items():
+        compact[key] = limit_nested_lists(to_jsonable(value), max_items=12)
+    return compact
+
+
+def limit_nested_lists(value: Any, max_items: int) -> Any:
+    if isinstance(value, list):
+        if len(value) <= max_items:
+            return [limit_nested_lists(item, max_items) for item in value]
+        return {
+            "first": [limit_nested_lists(item, max_items) for item in value[: max_items // 2]],
+            "last": [limit_nested_lists(item, max_items) for item in value[-max_items // 2 :]],
+            "omitted_items": len(value) - max_items,
+        }
     if isinstance(value, dict):
-        return SpecialistResult.model_validate(value)
-    return SpecialistResult(summary=stringify_output(value), confidence="medium")
+        return {key: limit_nested_lists(item, max_items) for key, item in value.items()}
+    return value
 
 
-def stringify_output(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    if hasattr(value, "model_dump"):
-        return json.dumps(value.model_dump(mode="json"), ensure_ascii=False, indent=2)
-    return json.dumps(to_jsonable(value), ensure_ascii=False, indent=2)
+def mcp_args_for_tool(tool_name: str, stock: str) -> dict[str, Any]:
+    if tool_name == "calculate_moving_average":
+        return {"stock_id": stock, "days": 20}
+    return {"stock_id": stock}
 
 
-def extract_image_payload(result: Any) -> dict[str, Any] | None:
-    data = to_jsonable(result)
-    text = json.dumps(data, ensure_ascii=False)
-    if "image" not in text.lower():
-        return None
-    return {"raw_result_excerpt": text[:2000]}
+async def call_mcp_tool(
+    mcp_servers: list[MCPServer],
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> Any:
+    server = await find_server_for_tool(mcp_servers, tool_name)
+    if server is None:
+        raise RuntimeError(f"MCP tool {tool_name} is not available.")
+    result = await server.call_tool(tool_name, arguments)
+    return to_jsonable(result)
+
+
+async def find_server_for_tool(mcp_servers: list[MCPServer], tool_name: str) -> MCPServer | None:
+    for server in mcp_servers:
+        cached_tools = server.cached_tools
+        tools = cached_tools if cached_tools is not None else await server.list_tools()
+        if any(tool.name == tool_name for tool in tools):
+            return server
+    return None
 
 
 async def normalize_agent_event(event: Any) -> AsyncIterator[dict[str, Any]]:
@@ -221,9 +325,66 @@ async def normalize_agent_event(event: Any) -> AsyncIterator[dict[str, Any]]:
             return
 
 
+def coerce_specialist_result(value: Any) -> SpecialistResult:
+    """Backward-compatible helper for existing tests and callers."""
+    if isinstance(value, SpecialistResult):
+        return value
+    if isinstance(value, dict):
+        return SpecialistResult.model_validate(value)
+    return SpecialistResult(summary=stringify_output(value), confidence="medium")
+
+
+def serialize_results(results: dict[str, SpecialistResult]) -> dict[str, Any]:
+    """Backward-compatible helper for existing tests and callers."""
+    return {key: value.model_dump(mode="json") for key, value in results.items()}
+
+
+def stringify_output(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if hasattr(value, "model_dump"):
+        return json.dumps(value.model_dump(mode="json"), ensure_ascii=False, indent=2)
+    return json.dumps(to_jsonable(value), ensure_ascii=False, indent=2)
+
+
+def extract_image_payload(result: Any) -> dict[str, Any] | None:
+    data = {
+        "final_output": to_jsonable(getattr(result, "final_output", None)),
+        "new_items": to_jsonable(getattr(result, "new_items", [])),
+        "raw_responses": to_jsonable(getattr(result, "raw_responses", [])),
+    }
+    image_result = find_image_generation_result(data)
+    if not image_result:
+        return None
+    image_url = f"data:image/png;base64,{image_result}"
+    return {
+        "b64_json": image_result,
+        "image_url": image_url,
+        "mime_type": "image/png",
+    }
+
+
+def find_image_generation_result(value: Any) -> str | None:
+    if isinstance(value, dict):
+        if value.get("type") == "image_generation_call" and isinstance(value.get("result"), str):
+            return value["result"]
+        for item in value.values():
+            found = find_image_generation_result(item)
+            if found:
+                return found
+    if isinstance(value, list):
+        for item in value:
+            found = find_image_generation_result(item)
+            if found:
+                return found
+    return None
+
+
 def to_jsonable(value: Any) -> Any:
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json")
+    if is_dataclass(value) and not isinstance(value, type):
+        return to_jsonable(asdict(value))
     if isinstance(value, dict):
         return {str(key): to_jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -231,64 +392,3 @@ def to_jsonable(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
-
-
-def overview_prompt(stock: str) -> str:
-    return f"分析股票 {stock} 的公司基本概要。請只輸出你的負責段落資料。"
-
-
-def financial_health_prompt(stock: str) -> str:
-    return f"分析股票 {stock} 的財務體質達標狀態。請查找最新可得財報資料。"
-
-
-def growth_prompt(stock: str) -> str:
-    return f"分析股票 {stock} 的成長動能，包含近6個月月營收 YoY/MoM 與 EPS 趨勢。"
-
-
-def valuation_prompt(stock: str) -> str:
-    return f"分析股票 {stock} 的估值狀態，包含 PE、PB、河流圖區間與目前股價高低。"
-
-
-def cashflow_prompt(stock: str) -> str:
-    return f"分析股票 {stock} 的現金流與財務結構。"
-
-
-def peer_prompt(stock: str) -> str:
-    return f"替股票 {stock} 找至少兩家同業，並做財務與估值比較。"
-
-
-def six_way_prompt(stock: str) -> str:
-    return f"依六種本益比估值法估算股票 {stock} 的合理價，缺資料請合理假設並註明。"
-
-
-def entry_strategy_prompt(stock: str, results: dict[str, SpecialistResult]) -> str:
-    return (
-        f"股票 {stock} 的專家分析如下。請只產出合理買進價格與分批策略。\n\n"
-        f"{json.dumps(serialize_results(results), ensure_ascii=False, indent=2)}"
-    )
-
-
-def synthesis_prompt(stock: str, results: dict[str, SpecialistResult]) -> str:
-    return (
-        f"請整合以下專家輸出，為股票 {stock} 產生完整繁體中文財務分析報告。\n"
-        "格式必須包含：公司基本概要、財務體質表、成長動能、估值分析、現金流與財務結構、"
-        "同業比較、合理買進價格與分批策略、六種本益比估值表、重點總結。\n"
-        f"最後逐字加入提醒：「{DISCLAIMER}」\n\n"
-        f"{json.dumps(serialize_results(results), ensure_ascii=False, indent=2)}"
-    )
-
-
-def visual_prompt(stock: str, results: dict[str, SpecialistResult]) -> str:
-    compact = {
-        key: {"summary": value.summary, "confidence": value.confidence, "assumptions": value.assumptions[:3]}
-        for key, value in results.items()
-    }
-    return (
-        f"請為股票 {stock} 產生一張繁體中文財務分析視覺摘要圖。"
-        "包含合理價區間、估值判斷、財務體質、成長動能與主要風險。"
-        f"資料摘要：{json.dumps(compact, ensure_ascii=False)}"
-    )
-
-
-def serialize_results(results: dict[str, SpecialistResult]) -> dict[str, Any]:
-    return {key: value.model_dump(mode="json") for key, value in results.items()}

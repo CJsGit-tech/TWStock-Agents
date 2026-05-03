@@ -10,7 +10,7 @@ Build a React chatbot interface that can stream LLM output while surfacing reaso
 - `twstock-mcp-fastmcp`: Python FastMCP server exposing Taiwan stock tools powered by `twstock`.
 - `chat-api`: FastAPI bridge that keeps `OPENAI_API_KEY` server-side, connects to both FastMCP servers with OpenAI Agents SDK `MCPServerStreamableHttp`, and streams normalized NDJSON events to the browser.
 - `chat-web`: React/Vite frontend that renders chat messages, reasoning deltas, tool events, and streaming text responses.
-- Financial analysis agents: backend specialists powered by OpenAI Agents SDK `WebSearchTool`, optional `ImageGenerationTool`, and existing MCP stock tools.
+- Financial analysis workflow: backend request parsing, deterministic MCP data collection, one OpenAI Agents SDK `FinancialAnalysisAgent` with `WebSearchTool`, and optional `FinancialVisualizationAgent` with `ImageGenerationTool`.
 
 ## Guided Starter Experience
 
@@ -18,7 +18,7 @@ The frontend includes an inline first-run guide and guided starter examples:
 
 - Arithmetic examples for MCP calculator tools.
 - Taiwan stock examples for `twstock-mcp-fastmcp`, including stock metadata, realtime quote, Best Four Point signal, and moving average prompts.
-- Financial-agent examples for complete Traditional Chinese stock analysis and six-way PE valuation.
+- Financial-analysis examples for focused or broader Taiwan stock questions.
 - Starter example clicks submit the first question immediately.
 - After the first response finishes, the app shows a second pre-built question for that example flow.
 - The second question requires a user click and is submitted through the same streaming chat path.
@@ -40,10 +40,9 @@ The backend emits one JSON object per line:
 - `tool_called`: an MCP/tool call was requested.
 - `tool_output`: the tool returned output.
 - `agent_event`: other Agents SDK run-item events.
-- `agent_started`: a skilled financial agent started.
-- `agent_completed`: a skilled financial agent completed.
-- `source_found`: a financial specialist returned a citation.
-- `image_generated`: the visual summary agent completed image generation.
+- `agent_started`: the financial orchestrator or analyst agent started.
+- `agent_completed`: the analyst agent completed.
+- `image_generated`: the visualization agent generated a chart image.
 - `done`: stream finished.
 - `error`: backend or upstream error.
 
@@ -56,7 +55,7 @@ The backend emits one JSON object per line:
 - MCP health remains available at `http://localhost:8080/healthz`.
 - twstock MCP health is available at `http://localhost:8081/healthz`.
 - Chat stream processes independent reasoning, tool, and text events.
-- Financial-analysis stream processes specialist agent events, source events, tool events, and generated visual summaries.
+- Financial-analysis stream processes orchestrator events, analyst-agent events, visualization image events, and tool events.
 - First-run users can start from guided example cards or the inline guide.
 - Guided example cards auto-submit the selected prompt.
 - The next suggested question appears only after the first guided response completes.
