@@ -281,6 +281,46 @@ h1 {
   color: rgba(52, 211, 153, 0.6);
 }
 
+.image-attachment {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  overflow: hidden;
+}
+
+.image-attachment strong {
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.image-attachment img {
+  display: block;
+  width: min(100%, 520px);
+  max-height: 360px;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+.image-attachment small {
+  display: block;
+  max-height: 140px;
+  overflow: auto;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* ── Starter Experience ────────────────────────────────── */
 
 .starter-area {

@@ -19,6 +19,7 @@ interface Message {
   id: string;
   role: Role;
   content: string;
+  images?: GeneratedImage[];
 }
 
 interface StreamEvent {
@@ -30,10 +31,17 @@ interface StreamEvent {
   order: number;
 }
 
+interface GeneratedImage {
+  title: string;
+  description: string;
+  imageUrl?: string;
+}
+
 interface ExamplePrompt {
   label: string;
   category: string;
   prompt: string;
+  workflow?: Workflow;
 }
 
 interface GuidedExample {
@@ -43,10 +51,13 @@ interface GuidedExample {
   prompts: [ExamplePrompt, ExamplePrompt];
 }
 
+type Workflow = "chat" | "financial";
+
 interface ActiveGuide {
   flowId: string;
   stepIndex: number;
   status: "streaming" | "ready-next" | "complete";
+  workflow: Workflow;
 }
 
 interface TutorialStep {
@@ -58,6 +69,25 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 const TUTORIAL_STORAGE_KEY = "mcpChatTutorialDismissed";
 
 const GUIDED_EXAMPLES: GuidedExample[] = [
+  {
+    id: "financial-full-analysis",
+    title: "Financial analysis report",
+    summary: "Run the skilled financial agents for a complete Traditional Chinese report.",
+    prompts: [
+      {
+        label: "Full financial report",
+        category: "Financial Agents",
+        prompt: "完整分析 2330 台積電的財務體質與合理價。",
+        workflow: "financial",
+      },
+      {
+        label: "Six-way PE valuation",
+        category: "Financial Agents",
+        prompt: "估算 2330 的本益比合理價，並給我六種估值表。",
+        workflow: "financial",
+      },
+    ],
+  },
   {
     id: "arithmetic",
     title: "Arithmetic with memory",
@@ -122,11 +152,11 @@ const TUTORIAL_STEPS: TutorialStep[] = [
   },
   {
     title: "Review tool activity",
-    body: "Tool calls, tool outputs, and reasoning events are grouped by round in the event history.",
+    body: "Specialist agents, tool calls, tool outputs, and reasoning events are grouped by round in the event history.",
   },
   {
     title: "Continue with the next prompt",
-    body: "After the response completes, use the suggested second question to try a different MCP capability.",
+    body: "After the response completes, use the suggested second question to try a different MCP or financial-agent capability.",
   },
 ];
 
@@ -166,16 +196,19 @@ function App() {
   }
 
   function startGuidedExample(example: GuidedExample) {
-    submitPrompt(example.prompts[0].prompt, { flowId: example.id, stepIndex: 0 });
+    const firstPrompt = example.prompts[0];
+    submitPrompt(firstPrompt.prompt, { flowId: example.id, stepIndex: 0, workflow: firstPrompt.workflow ?? "chat" });
   }
 
   function continueGuidedExample() {
     if (!activeExample || !activeGuide || activeGuide.status !== "ready-next") {
       return;
     }
-    submitPrompt(activeExample.prompts[activeGuide.stepIndex].prompt, {
+    const nextPrompt = activeExample.prompts[activeGuide.stepIndex];
+    submitPrompt(nextPrompt.prompt, {
       flowId: activeExample.id,
       stepIndex: activeGuide.stepIndex,
+      workflow: nextPrompt.workflow ?? activeGuide.workflow,
     });
   }
 
@@ -195,7 +228,7 @@ function App() {
     await submitPrompt(input);
   }
 
-  async function submitPrompt(prompt: string, guideAction?: { flowId: string; stepIndex: number }) {
+  async function submitPrompt(prompt: string, guideAction?: { flowId: string; stepIndex: number; workflow: Workflow }) {
     const trimmed = prompt.trim();
     if (!trimmed || streamingRef.current) {
       return;
@@ -214,6 +247,7 @@ function App() {
       content: "",
     };
     const nextMessages = [...messages, userMessage, assistantMessage];
+    const workflow = guideAction?.workflow ?? inferWorkflow(trimmed);
 
     if (guideAction) {
       setActiveGuide({ ...guideAction, status: "streaming" });
@@ -225,14 +259,10 @@ function App() {
 
     let completed = false;
     try {
-      const response = await fetch(`${API_BASE}/api/chat/stream`, {
+      const response = await fetch(`${API_BASE}${endpointForWorkflow(workflow)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: nextMessages
-            .filter((message) => message.content.trim())
-            .map(({ role, content }) => ({ role, content })),
-        }),
+        body: JSON.stringify(payloadForWorkflow(workflow, trimmed, nextMessages)),
       });
 
       if (!response.ok || !response.body) {
@@ -256,6 +286,7 @@ function App() {
         setActiveGuide({
           flowId: guideAction.flowId,
           stepIndex: guideAction.stepIndex + 1,
+          workflow: guideAction.workflow,
           status: guideAction.stepIndex + 1 >= 2 ? "complete" : "ready-next",
         });
       }
@@ -289,6 +320,31 @@ function App() {
       return;
     }
 
+    if (type === "agent_started") {
+      appendEvent(assistantId, type, `Agent started: ${String(payload.agent ?? "unknown")}`, summarize(payload));
+      return;
+    }
+
+    if (type === "agent_completed") {
+      appendEvent(assistantId, type, `Agent completed: ${String(payload.agent ?? "unknown")}`, summarize(payload));
+      return;
+    }
+
+    if (type === "source_found") {
+      appendEvent(assistantId, type, `Source: ${String(payload.title ?? payload.url ?? "source")}`, summarize(payload));
+      return;
+    }
+
+    if (type === "image_generated") {
+      appendEvent(assistantId, type, `Image generated: ${String(payload.title ?? "visual summary")}`, summarize(payload));
+      appendAssistantImage(assistantId, {
+        title: String(payload.title ?? "Financial visual summary"),
+        description: String(payload.description ?? ""),
+        imageUrl: imageUrlFromPayload(payload.image),
+      });
+      return;
+    }
+
     if (type === "mcp_ready") {
       return;
     }
@@ -310,6 +366,14 @@ function App() {
   function appendAssistantText(id: string, delta: string) {
     setMessages((current) =>
       current.map((message) => (message.id === id ? { ...message, content: message.content + delta } : message)),
+    );
+  }
+
+  function appendAssistantImage(id: string, image: GeneratedImage) {
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === id ? { ...message, images: [...(message.images ?? []), image] } : message,
+      ),
     );
   }
 
@@ -362,6 +426,13 @@ function App() {
                 <article key={message.id} className={`message ${message.role}`}>
                   <span className="role-label">{message.role}</span>
                   <p>{message.content || (message.role === "assistant" && isStreaming ? "..." : "")}</p>
+                  {message.images?.map((image) => (
+                    <div className="image-attachment" key={`${message.id}-${image.title}`}>
+                      <strong>{image.title}</strong>
+                      {image.imageUrl ? <img src={image.imageUrl} alt={image.title} /> : null}
+                      {image.description ? <small>{image.description}</small> : null}
+                    </div>
+                  ))}
                 </article>
               ))}
               <div ref={bottomRef} />
@@ -666,6 +737,48 @@ function allEvents(currentEvent: StreamEvent | null, eventHistory: StreamEvent[]
 function roundIndex(messageId: string, messages: Message[]): number {
   const assistantMessages = messages.filter((message) => message.role === "assistant");
   return assistantMessages.findIndex((message) => message.id === messageId);
+}
+
+function endpointForWorkflow(workflow: Workflow): string {
+  return workflow === "financial" ? "/api/financial-analysis/stream" : "/api/chat/stream";
+}
+
+function payloadForWorkflow(workflow: Workflow, prompt: string, messages: Message[]) {
+  if (workflow === "financial") {
+    return {
+      stock: extractStockInput(prompt),
+      question: prompt,
+    };
+  }
+
+  return {
+    messages: messages
+      .filter((message) => message.content.trim())
+      .map(({ role, content }) => ({ role, content })),
+  };
+}
+
+function inferWorkflow(prompt: string): Workflow {
+  return /財務|合理價|本益比|估值|同業|現金流|分批|完整分析/.test(prompt) ? "financial" : "chat";
+}
+
+function extractStockInput(prompt: string): string {
+  const match = prompt.match(/\b\d{4,6}\b/);
+  return match?.[0] ?? prompt;
+}
+
+function imageUrlFromPayload(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of ["url", "image_url", "b64_json"]) {
+    const candidate = record[key];
+    if (typeof candidate === "string" && candidate) {
+      return key === "b64_json" ? `data:image/png;base64,${candidate}` : candidate;
+    }
+  }
+  return undefined;
 }
 
 async function readNdjsonStream(stream: ReadableStream<Uint8Array>, onPayload: (payload: Record<string, unknown>) => void) {

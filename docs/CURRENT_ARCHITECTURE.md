@@ -11,6 +11,8 @@ This project currently runs a Docker Compose based MCP chatbot with Python FastM
 
 The frontend streams assistant text into the chat bubble while showing reasoning and tool events in a right-side event history panel grouped by chat round.
 
+The backend also exposes a financial-analysis workflow where task-specific OpenAI Agents SDK specialists use WebSearch, ImageGeneration, and existing MCP tools to produce Traditional Chinese stock reports.
+
 ## Key Architecture Decision
 
 Use Python FastMCP for MCP servers:
@@ -39,12 +41,58 @@ flowchart LR
     web -->|POST /api/chat/stream<br/>NDJSON response stream| api
     api -->|MCP streamable HTTP<br/>/mcp| arithmetic
     api -->|MCP streamable HTTP<br/>/mcp| twstock
+    api -->|Financial specialist agents<br/>WebSearch + ImageGeneration| openai
     api -->|Model request + streaming events| openai
     openai -->|Text, reasoning, tool orchestration events| api
     arithmetic -->|Tool results<br/>addition/subtraction/multiplication/divide| api
     twstock -->|Taiwan stock metadata, quotes,<br/>historical data, moving averages, signals| api
     api -->|text_delta, reasoning_event,<br/>tool_called, tool_output, error| web
     web -->|Assistant bubble + event panel| user
+```
+
+## Financial Analysis Skilled Agents
+
+```mermaid
+flowchart TB
+    request[POST /api/financial-analysis/stream<br/>stock: 2330 or 台積電]
+    orchestrator[FinancialReportOrchestrator]
+
+    company[CompanyOverviewAgent]
+    health[FinancialHealthAgent]
+    growth[GrowthMomentumAgent]
+    valuation[ValuationStateAgent]
+    cashflow[CashFlowStructureAgent]
+    peers[PeerComparisonAgent]
+    sixway[SixWayPEValuationAgent]
+    entry[EntryStrategyAgent]
+    visual[VisualSummaryAgent]
+
+    websearch[OpenAI WebSearchTool]
+    imagegen[OpenAI ImageGenerationTool]
+    mcp[twstock MCP tools]
+    final[Traditional Chinese report<br/>tables + summary + disclaimer]
+
+    request --> orchestrator
+    orchestrator --> company
+    orchestrator --> health
+    orchestrator --> growth
+    orchestrator --> valuation
+    orchestrator --> cashflow
+    orchestrator --> peers
+    orchestrator --> sixway
+    company --> websearch
+    company --> mcp
+    health --> websearch
+    growth --> websearch
+    valuation --> websearch
+    valuation --> mcp
+    cashflow --> websearch
+    peers --> websearch
+    sixway --> websearch
+    orchestrator --> entry
+    orchestrator --> final
+    orchestrator --> visual
+    visual --> imagegen
 ```
 
 ## Request And Event Flow
@@ -100,6 +148,7 @@ sequenceDiagram
 | `GET /api/health` | `chat-api` | Backend health check. |
 | `GET /api/mcp/tools` | `chat-api` | Lists tools discovered from the MCP server. |
 | `POST /api/chat/stream` | `chat-api` | Main chatbot endpoint; returns newline-delimited JSON events. |
+| `POST /api/financial-analysis/stream` | `chat-api` | Runs skilled financial-analysis agents for one stock and streams normalized NDJSON events. |
 | `GET /healthz` | `arithmetic-mcp-fastmcp` | MCP server health check exposed by the container app. |
 | `/mcp` | `arithmetic-mcp-fastmcp` | FastMCP streamable HTTP transport endpoint. |
 | `GET /healthz` | `twstock-mcp-fastmcp` | Taiwan stock MCP server health check. |
@@ -184,6 +233,13 @@ The frontend intentionally ignores these events in the event history:
 - `done`
 - generic `agent_event`
 
+Financial-analysis streams additionally emit:
+
+- `agent_started`: a skilled agent has started its section.
+- `agent_completed`: a skilled agent completed its section.
+- `source_found`: a specialist returned a cited source URL.
+- `image_generated`: the visual summary agent completed an image-generation step.
+
 ## Chat Round Memory
 
 The browser sends the visible chat transcript to `chat-api`.
@@ -215,6 +271,14 @@ OPENAI_MODEL="gpt-5-mini"
 ```
 
 `OPENAI_MODEL` is optional. If it is omitted, Compose uses `gpt-5-mini`.
+
+Financial-analysis options:
+
+```sh
+FINANCIAL_ANALYSIS_MODEL="gpt-5-mini"
+FINANCIAL_ANALYSIS_WEB_CONTEXT="medium"
+ENABLE_FINANCIAL_IMAGE="true"
+```
 
 `chat-api` connects to the FastMCP servers inside the Compose network with:
 

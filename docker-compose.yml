@@ -33,6 +33,9 @@ services:
       - "8000:8000"
     environment:
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5-mini}
+      FINANCIAL_ANALYSIS_MODEL: ${FINANCIAL_ANALYSIS_MODEL:-gpt-5-mini}
+      FINANCIAL_ANALYSIS_WEB_CONTEXT: ${FINANCIAL_ANALYSIS_WEB_CONTEXT:-medium}
+      ENABLE_FINANCIAL_IMAGE: ${ENABLE_FINANCIAL_IMAGE:-true}
       MCP_HTTP_URL: http://arithmetic-mcp-fastmcp:8080/mcp
       TWSTOCK_MCP_HTTP_URL: http://twstock-mcp-fastmcp:8081/mcp
       CORS_ALLOW_ORIGINS: "*"

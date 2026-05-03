@@ -18,6 +18,8 @@ from openai.types.responses import (
 )
 from pydantic import BaseModel, Field
 
+from financial_agents import FinancialAnalysisRequest, run_financial_analysis
+
 load_dotenv()
 
 ARITHMETIC_MCP_SERVER_NAME = "arithmetic-mcp-fastmcp"
@@ -77,6 +79,18 @@ async def mcp_tools() -> dict[str, Any]:
 async def chat_stream(request: ChatRequest) -> StreamingResponse:
     return StreamingResponse(
         stream_agent_events(request.messages),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/financial-analysis/stream")
+async def financial_analysis_stream(request: FinancialAnalysisRequest) -> StreamingResponse:
+    return StreamingResponse(
+        stream_financial_analysis_events(request.stock),
         media_type="application/x-ndjson",
         headers={
             "Cache-Control": "no-cache",
@@ -148,6 +162,37 @@ async def stream_agent_events(messages: list[ChatMessage]) -> AsyncIterator[str]
             async for event in result.stream_events():
                 async for normalized in normalize_agent_event(event):
                     yield encode_event(normalized["type"], normalized["payload"])
+
+            yield encode_event("done", {})
+    except Exception as exc:
+        yield encode_event("error", {"message": str(exc)})
+
+
+async def stream_financial_analysis_events(stock: str) -> AsyncIterator[str]:
+    if not os.getenv("OPENAI_API_KEY"):
+        yield encode_event(
+            "error",
+            {
+                "message": "OPENAI_API_KEY is not set on the backend service.",
+            },
+        )
+        return
+
+    try:
+        async with AsyncExitStack() as stack:
+            mcp_servers = [await stack.enter_async_context(server) for server in build_mcp_servers()]
+            for server in mcp_servers:
+                tools = await server.list_tools()
+                yield encode_event(
+                    "mcp_ready",
+                    {
+                        "server": server.name,
+                        "tools": [tool.name for tool in tools],
+                    },
+                )
+
+            async for event in run_financial_analysis(stock, mcp_servers):
+                yield encode_event(event["type"], event["payload"])
 
             yield encode_event("done", {})
     except Exception as exc:

@@ -1,4 +1,6 @@
-# Python FastMCP Arithmetic Server
+# TWStock Agents
+
+Docker Compose app for MCP-backed arithmetic tools, Taiwan stock tools, and skilled financial-analysis agents.
 
 Identifiable MCP server name: `arithmetic-mcp-fastmcp`
 
@@ -30,6 +32,7 @@ The React chatbot stack adds:
 
 - Chat UI: `http://localhost:5173`
 - Chat API: `http://localhost:8000/api/health`
+- Financial analysis stream: `POST http://localhost:8000/api/financial-analysis/stream`
 
 ## Run With Docker Compose
 
@@ -38,9 +41,12 @@ Create a `.env` file in this folder with your OpenAI API key:
 ```sh
 OPENAI_API_KEY="..."
 OPENAI_MODEL="gpt-5-mini"
+FINANCIAL_ANALYSIS_MODEL="gpt-5-mini"
+FINANCIAL_ANALYSIS_WEB_CONTEXT="medium"
+ENABLE_FINANCIAL_IMAGE="true"
 ```
 
-`OPENAI_MODEL` is optional. If it is omitted, Compose uses `gpt-5-mini`.
+Only `OPENAI_API_KEY` is required. The other variables are optional.
 
 Start the full MCP chatbot stack:
 
@@ -75,6 +81,31 @@ The Compose stack starts four services:
 - `twstock-mcp-fastmcp`: Python FastMCP Taiwan stock server powered by `twstock`.
 - `chat-api`: Python FastAPI bridge using the OpenAI Agents SDK and the MCP server.
 - `chat-web`: React/Vite chatbot UI that streams reasoning, tool, and text events.
+
+## Financial Analysis Agents
+
+The backend exposes a skilled-agent workflow for Traditional Chinese stock analysis:
+
+```sh
+curl -N http://localhost:8000/api/financial-analysis/stream \
+  -H "Content-Type: application/json" \
+  -d '{"stock":"2330"}'
+```
+
+Specialists include:
+
+- `CompanyOverviewAgent`
+- `FinancialHealthAgent`
+- `GrowthMomentumAgent`
+- `ValuationStateAgent`
+- `CashFlowStructureAgent`
+- `PeerComparisonAgent`
+- `EntryStrategyAgent`
+- `SixWayPEValuationAgent`
+- `VisualSummaryAgent`
+- `FinancialReportOrchestrator`
+
+The stream emits `agent_started`, `agent_completed`, `source_found`, `tool_called`, `tool_output`, `text_delta`, `image_generated`, `error`, and `done`.
 
 ## Run The MCP Server Directly
 
