@@ -5,13 +5,9 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from financial_agents.orchestrator import (
-    build_analysis_plan,
     coerce_specialist_result,
-    extract_image_payload,
-    infer_sections,
     serialize_results,
 )
-from financial_agents.prompt_store import list_prompts, render_prompt
 from financial_agents.schemas import DISCLAIMER, FinalReport, SpecialistResult, normalize_stock_input
 
 
@@ -25,6 +21,16 @@ class FinancialAgentSchemaTests(unittest.TestCase):
         self.assertEqual(result.summary, "資料不足，需補充來源。")
         self.assertEqual(result.confidence, "medium")
 
+    def test_specialist_result_coercion_from_dict(self):
+        result = coerce_specialist_result({"summary": "完成", "confidence": "high"})
+        self.assertEqual(result.summary, "完成")
+        self.assertEqual(result.confidence, "high")
+
+    def test_specialist_result_coercion_passthrough(self):
+        original = SpecialistResult(summary="test")
+        result = coerce_specialist_result(original)
+        self.assertIs(result, original)
+
     def test_final_report_defaults_disclaimer(self):
         report = FinalReport(stock="2330")
         self.assertEqual(report.disclaimer, DISCLAIMER)
@@ -36,48 +42,67 @@ class FinancialAgentSchemaTests(unittest.TestCase):
         self.assertEqual(serialized["financial_health"]["summary"], "完成")
         self.assertEqual(serialized["financial_health"]["table_rows"][0]["指標"], "EPS")
 
-    def test_infer_sections_uses_focused_question(self):
-        self.assertEqual(infer_sections("只分析 2454 的估值和同業比較"), ["valuation", "peers"])
 
-    def test_infer_sections_detects_visualization_request(self):
-        self.assertEqual(infer_sections("用這個資訊生成一張圖"), ["visualization"])
+class VisualizationDetectionTests(unittest.TestCase):
+    def test_detects_chinese_chart_request(self):
+        from financial_agents.orchestrator import _is_visualization_request
+        self.assertTrue(_is_visualization_request("用這個資訊生成一張圖"))
+        self.assertTrue(_is_visualization_request("畫一張圖表"))
+        self.assertTrue(_is_visualization_request("視覺化"))
 
-    def test_build_analysis_plan_preserves_question(self):
-        plan = build_analysis_plan("完整分析 2330 台積電", "只看 2330 的現金流")
-        self.assertEqual(plan.stock, "2330")
-        self.assertEqual(plan.question, "只看 2330 的現金流")
-        self.assertEqual(plan.sections, ["cashflow"])
+    def test_detects_english_chart_request(self):
+        from financial_agents.orchestrator import _is_visualization_request
+        self.assertTrue(_is_visualization_request("generate a chart"))
+        self.assertTrue(_is_visualization_request("visualize this data"))
 
-    def test_build_analysis_plan_can_use_context_stock_for_followup_chart(self):
-        plan = build_analysis_plan("用這個資訊生成一張圖", "用這個資訊生成一張圖", "ASSISTANT: 1717 長興目前成交價 78.9")
-        self.assertEqual(plan.stock, "1717")
-        self.assertEqual(plan.sections, ["visualization"])
+    def test_does_not_detect_analysis_request(self):
+        from financial_agents.orchestrator import _is_visualization_request
+        self.assertFalse(_is_visualization_request("完整分析 2330 台積電"))
+        self.assertFalse(_is_visualization_request("只看估值"))
 
-    def test_prompt_store_renders_input_template(self):
-        prompt = render_prompt(
-            "financial_analysis.input",
-            stock="2330",
-            question="Analyze valuation.",
-            sections="valuation",
-            collected_data="{}",
-        )
-        self.assertIn("Analyze valuation.", prompt)
-        self.assertIn("2330", prompt)
 
-    def test_prompt_store_lists_dispatch_prompt(self):
-        names = {prompt.name for prompt in list_prompts()}
-        self.assertIn("manager_dispatch.instructions", names)
-
+class ImagePayloadExtractionTests(unittest.TestCase):
     def test_extract_image_payload_from_response_item(self):
+        from financial_agents.orchestrator import _extract_image_payload
+
+        class FakeResponse:
+            output = [{"type": "image_generation_call", "result": "abc123" + "x" * 200}]
+
         class FakeResult:
             final_output = ""
             new_items = []
-            raw_responses = [{"output": [{"type": "image_generation_call", "result": "abc123"}]}]
+            raw_responses = [FakeResponse()]
 
-        image = extract_image_payload(FakeResult())
+        image = _extract_image_payload(FakeResult())
         self.assertIsNotNone(image)
-        self.assertEqual(image["b64_json"], "abc123")
-        self.assertEqual(image["image_url"], "data:image/png;base64,abc123")
+        self.assertTrue(image["b64_json"].startswith("abc123"))
+        self.assertTrue(image["image_url"].startswith("data:image/png;base64,"))
+
+    def test_extract_image_payload_from_new_items(self):
+        from financial_agents.orchestrator import _extract_image_payload
+
+        class FakeItem:
+            raw_item = {"type": "image_generation_call", "result": "img_data_" + "A" * 200}
+            output = None
+
+        class FakeResult:
+            final_output = ""
+            new_items = [FakeItem()]
+            raw_responses = []
+
+        image = _extract_image_payload(FakeResult())
+        self.assertIsNotNone(image)
+        self.assertTrue(image["b64_json"].startswith("img_data_"))
+
+    def test_extract_image_payload_returns_none_when_no_image(self):
+        from financial_agents.orchestrator import _extract_image_payload
+
+        class FakeResult:
+            final_output = "just text"
+            new_items = []
+            raw_responses = []
+
+        self.assertIsNone(_extract_image_payload(FakeResult()))
 
 
 if __name__ == "__main__":

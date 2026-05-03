@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
 from typing import Any, Literal
 
-from agents import Agent, Runner
+from agents import Agent, ModelSettings, Runner
 from agents.items import ToolCallItem, ToolCallOutputItem
 from agents.mcp import MCPServerStreamableHttp
 from dotenv import load_dotenv
@@ -104,14 +104,14 @@ def build_mcp_servers() -> list[MCPServerStreamableHttp]:
         MCPServerStreamableHttp(
             params={"url": os.getenv("MCP_HTTP_URL", DEFAULT_ARITHMETIC_MCP_URL)},
             name=ARITHMETIC_MCP_SERVER_NAME,
-            cache_tools_list=True,
+            cache_tools_list=False,
             use_structured_content=True,
             client_session_timeout_seconds=15,
         ),
         MCPServerStreamableHttp(
             params={"url": os.getenv("TWSTOCK_MCP_HTTP_URL", DEFAULT_TWSTOCK_MCP_URL)},
             name=TWSTOCK_MCP_SERVER_NAME,
-            cache_tools_list=True,
+            cache_tools_list=False,
             use_structured_content=True,
             client_session_timeout_seconds=30,
         ),
@@ -141,6 +141,13 @@ async def stream_agent_events(messages: list[ChatMessage]) -> AsyncIterator[str]
                     },
                 )
 
+            chat_model = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+            chat_settings = (
+                ModelSettings(reasoning={"effort": "low"})
+                if chat_model.startswith(("gpt-5", "o3", "o4"))
+                else ModelSettings()
+            )
+
             agent = Agent(
                 name="MCP Chat Agent",
                 instructions=(
@@ -154,7 +161,8 @@ async def stream_agent_events(messages: list[ChatMessage]) -> AsyncIterator[str]
                     "round's final answer as the remembered value. Do not add intermediate values "
                     "from prior explanations unless the user explicitly asks for intermediate values."
                 ),
-                model=os.getenv("OPENAI_MODEL", "gpt-5-mini"),
+                model=chat_model,
+                model_settings=chat_settings,
                 mcp_servers=mcp_servers,
             )
 

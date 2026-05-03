@@ -100,7 +100,7 @@ The workflow:
 - Infers requested sections in backend code.
 - Collects common structured data through MCP tools.
 - Streams one analyst agent response.
-- Runs `FinancialVisualizationAgent` with `ImageGenerationTool` when the user asks for a chart/image from the stock data.
+- Runs `FinancialVisualizationAgent` with `ImageGenerationTool` when the user asks for a chart/image from numerical data already shown in recent chat history.
 
 The stream emits `agent_started`, `agent_completed`, `reasoning_event`, `tool_called`, `tool_output`, `text_delta`, `image_generated`, `error`, and `done`.
 

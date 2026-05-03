@@ -72,7 +72,7 @@ const GUIDED_EXAMPLES: GuidedExample[] = [
   {
     id: "financial-full-analysis",
     title: "Financial analysis",
-    summary: "The backend selects the requested sections, collects stock data, and asks one analyst agent to respond.",
+    summary: "The agent uses MCP stock tools and WebSearch to analyze the stock and write a report.",
     prompts: [
       {
         label: "Full financial report",
@@ -146,7 +146,7 @@ const GUIDED_EXAMPLES: GuidedExample[] = [
 const TUTORIAL_STEPS: TutorialStep[] = [
   {
     title: "Pick a guided example",
-    body: "Click a sample question to submit it. The backend will choose the requested analysis sections.",
+    body: "Click a sample question to submit it. The agent decides which tools to call.",
   },
   {
     title: "Watch the workflow",

@@ -1,9 +1,26 @@
+"""
+Financial Analysis Orchestrator.
+
+Thin orchestration layer: parses the user request, hands it to the
+FinancialAnalysisAgent (which owns all tool-calling decisions via the
+OpenAI Agents SDK), and streams events to the frontend.
+
+The agent has MCP twstock tools and WebSearch available.  The SDK's
+native tool-calling loop lets the model decide which tools to call,
+in what order, and how many times.
+
+Visualization is handled separately: when the user asks for a chart,
+the orchestrator runs the FinancialVisualizationAgent with the chat
+context as input data.
+"""
+
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import AsyncIterator
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from agents import Runner
@@ -16,35 +33,25 @@ from openai.types.responses import (
 )
 
 from .agents import financial_analysis_agent, financial_visualization_agent
-from .prompt_store import render_prompt
 from .schemas import SpecialistResult, normalize_stock_input
 
+# ---------------------------------------------------------------------------
+# Visualization detection
+# ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
-class AnalysisPlan:
-    stock: str
-    question: str
-    sections: list[str]
-    context: str = ""
+_VISUALIZATION_PATTERN = re.compile(
+    r"圖|圖表|視覺化|畫|chart|visual|visualize|image|graph|plot",
+    re.IGNORECASE,
+)
 
 
-SECTION_PATTERNS: list[tuple[str, str]] = [
-    ("overview", r"公司|概要|基本|產品|客戶|business|company|overview"),
-    ("quote", r"股價|即時|quote|price|current"),
-    ("technical", r"技術|均線|移動平均|四大|買賣點|歷史|OHLC|technical|moving average"),
-    ("valuation", r"估值|合理價|本益比|PE|PB|fair value|valuation"),
-    ("growth", r"成長|營收|EPS|動能|growth|momentum"),
-    ("financial_health", r"財務體質|毛利|營益|淨利|ROE|margin|health"),
-    ("cashflow", r"現金流|負債|庫存|cash ?flow|debt|inventory"),
-    ("peers", r"同業|比較|peer|competitor"),
-    ("entry_strategy", r"分批|買進|進場|entry|strategy"),
-    ("visualization", r"圖|圖表|視覺化|畫|chart|visual|visualize|image|graph|plot"),
-]
+def _is_visualization_request(question: str) -> bool:
+    return bool(_VISUALIZATION_PATTERN.search(question))
 
-DEFAULT_SECTIONS = ["overview", "quote", "valuation", "growth"]
-FULL_ANALYSIS_PATTERN = re.compile(r"完整|全部|全面|full|complete|report", re.IGNORECASE)
-ALL_SECTIONS = [name for name, _pattern in SECTION_PATTERNS if name != "visualization"]
 
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
 
 async def run_financial_analysis(
     stock: str,
@@ -52,238 +59,151 @@ async def run_financial_analysis(
     question: str | None = None,
     context: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    """Run the simplified financial workflow and yield NDJSON-compatible events."""
+    """Run the financial analysis and yield NDJSON-compatible events."""
 
-    plan = build_analysis_plan(stock=stock, question=question, context=context)
+    normalized_stock = normalize_stock_input(stock)
+    effective_question = (question or stock).strip() or normalized_stock
 
-    yield {
-        "type": "agent_started",
-        "payload": {
-            "agent": "FinancialAnalysisOrchestrator",
-            "detail": f"Planning analysis for {plan.stock}",
-        },
-    }
-    yield {
-        "type": "reasoning_event",
-        "payload": {
-            "event_type": "analysis_plan",
-            "data": {
-                "stock": plan.stock,
-                "question": plan.question,
-                "sections": plan.sections,
-                "has_context": bool(plan.context),
-            },
-        },
-    }
+    # Decide whether this is a visualization request or an analysis request
+    if _is_visualization_request(effective_question):
+        async for event in _run_visualization(normalized_stock, effective_question, context):
+            yield event
+        return
 
-    collected_data: dict[str, Any] = {}
-    async for event in collect_financial_data(plan, mcp_servers, collected_data):
-        yield event
-
+    # --- Analysis flow: let the agent handle everything ---
     yield {
         "type": "agent_started",
         "payload": {
             "agent": "FinancialAnalysisAgent",
-            "detail": "Interpreting collected data",
+            "detail": f"Analyzing {normalized_stock}",
         },
     }
 
     agent = financial_analysis_agent(mcp_servers)
-    prompt = render_prompt(
-        "financial_analysis.input",
-        stock=plan.stock,
-        question=plan.question,
-        sections=", ".join(plan.sections),
-        collected_data=json.dumps(collected_data, ensure_ascii=False, indent=2),
-    )
+    prompt = f"股票：{normalized_stock}\n問題：{effective_question}"
+    if context:
+        prompt += f"\n\n先前對話摘要：\n{context[-3000:]}"
 
-    result = Runner.run_streamed(agent, input=prompt, max_turns=12)
+    result = Runner.run_streamed(agent, input=prompt, max_turns=20)
     async for event in result.stream_events():
-        async for normalized in normalize_agent_event(event):
+        async for normalized in _normalize_agent_event(event):
             yield normalized
 
     yield {
         "type": "agent_completed",
-        "payload": {"agent": "FinancialAnalysisAgent", "summary": "Analysis response completed"},
+        "payload": {
+            "agent": "FinancialAnalysisAgent",
+            "summary": "Analysis completed",
+        },
     }
 
-    if "visualization" in plan.sections:
-        async for event in run_financial_visualization(plan, collected_data):
-            yield event
+    # If image generation is enabled and this was a full analysis,
+    # the agent may have already answered everything.  Visualization
+    # is only triggered when the user explicitly asks for a chart.
 
 
-def build_analysis_plan(
+# ---------------------------------------------------------------------------
+# Visualization flow
+# ---------------------------------------------------------------------------
+
+async def _run_visualization(
     stock: str,
-    question: str | None = None,
-    context: str | None = None,
-) -> AnalysisPlan:
-    normalized_stock = normalize_stock_input(stock)
-    effective_question = (question or stock).strip() or normalized_stock
-    sections = infer_sections(effective_question)
-    effective_context = (context or "").strip()
-    if not normalized_stock.isdigit() and effective_context:
-        context_stock = normalize_stock_input(effective_context)
-        if context_stock.isdigit():
-            normalized_stock = context_stock
-    return AnalysisPlan(
-        stock=normalized_stock,
-        question=effective_question,
-        sections=sections,
-        context=effective_context,
-    )
-
-
-def infer_sections(question: str) -> list[str]:
-    if FULL_ANALYSIS_PATTERN.search(question):
-        return ALL_SECTIONS.copy()
-
-    sections = [
-        name
-        for name, pattern in SECTION_PATTERNS
-        if re.search(pattern, question, re.IGNORECASE)
-    ]
-    return sections or DEFAULT_SECTIONS.copy()
-
-
-async def collect_financial_data(
-    plan: AnalysisPlan,
-    mcp_servers: list[MCPServer],
-    collected_data: dict[str, Any],
+    question: str,
+    context: str | None,
 ) -> AsyncIterator[dict[str, Any]]:
-    if not plan.stock.isdigit():
-        collected_data["note"] = "No numeric Taiwan stock code was detected; MCP stock lookups may be skipped."
+    """Run the visualization agent with chat context as data source."""
+
+    if os.getenv("ENABLE_FINANCIAL_IMAGE", "true").lower() != "true":
+        yield {
+            "type": "error",
+            "payload": {
+                "agent": "FinancialVisualizationAgent",
+                "message": "Image generation is disabled (ENABLE_FINANCIAL_IMAGE=false).",
+            },
+        }
         return
 
-    tool_calls = ["get_stock_info", "get_realtime_quote"]
-    if "technical" in plan.sections or "visualization" in plan.sections:
-        tool_calls.extend(["get_historical_data", "calculate_moving_average", "analyze_best_four_point"])
-    elif any(section in plan.sections for section in ("valuation", "growth")):
-        tool_calls.append("get_historical_data")
-
-    for tool_name in dict.fromkeys(tool_calls):
-        args = mcp_args_for_tool(tool_name, plan.stock)
-        yield {
-            "type": "tool_called",
-            "payload": {"item": {"name": tool_name, "arguments": args, "source": "backend_data_collector"}},
-        }
-        try:
-            result = await call_mcp_tool(mcp_servers, tool_name, args)
-            collected_data[tool_name] = result
-            yield {"type": "tool_output", "payload": {"output": {tool_name: result}}}
-        except Exception as exc:
-            error = {"success": False, "error": str(exc)}
-            collected_data[tool_name] = error
-            yield {
-                "type": "tool_output",
-                "payload": {"output": {tool_name: error}},
-            }
-
-
-async def run_financial_visualization(
-    plan: AnalysisPlan,
-    collected_data: dict[str, Any],
-) -> AsyncIterator[dict[str, Any]]:
     yield {
         "type": "agent_started",
         "payload": {
             "agent": "FinancialVisualizationAgent",
-            "detail": "Generating chart image from stock data",
+            "detail": "Generating visualization",
         },
     }
 
-    visualization_data = compact_visualization_data(collected_data)
-    prompt = render_prompt(
-        "financial_visualization.input",
-        stock=plan.stock,
-        question=plan.question,
-        sections=", ".join(plan.sections),
-        context=plan.context[-2500:],
-        visualization_data=json.dumps(visualization_data, ensure_ascii=False, indent=2),
+    # Build prompt from chat context — the visualization agent uses
+    # data already shown in the conversation, not fresh tool calls.
+    chart_data = _extract_chart_data(context) if context else "No prior data available."
+    prompt = (
+        f"股票：{stock}\n"
+        f"使用者要求：{question}\n\n"
+        f"以下是對話中已有的數據，用這些數據生成圖表：\n{chart_data}"
     )
 
     try:
-        result = await Runner.run(financial_visualization_agent(), prompt, max_turns=6)
-        image = extract_image_payload(result)
-        description = stringify_output(result.final_output)[:500]
+        vis_result = await Runner.run(financial_visualization_agent(), prompt, max_turns=6)
+        image = _extract_image_payload(vis_result)
+        description = _stringify_output(vis_result.final_output)[:500]
+
         if image:
             yield {
                 "type": "image_generated",
                 "payload": {
                     "agent": "FinancialVisualizationAgent",
-                    "title": f"{plan.stock} financial visualization",
+                    "title": f"{stock} financial visualization",
                     "description": description,
                     "image": image,
                 },
             }
             yield {
                 "type": "agent_completed",
-                "payload": {"agent": "FinancialVisualizationAgent", "summary": "Visualization image completed"},
+                "payload": {
+                    "agent": "FinancialVisualizationAgent",
+                    "summary": "Visualization completed",
+                },
             }
-            return
-
+        else:
+            # Log what we got for debugging
+            debug_info = {
+                "has_final_output": getattr(vis_result, "final_output", None) is not None,
+                "new_items_count": len(getattr(vis_result, "new_items", []) or []),
+                "new_items_types": [
+                    type(item).__name__ for item in (getattr(vis_result, "new_items", []) or [])
+                ],
+                "raw_responses_count": len(getattr(vis_result, "raw_responses", []) or []),
+            }
+            yield {
+                "type": "error",
+                "payload": {
+                    "agent": "FinancialVisualizationAgent",
+                    "message": f"Image generation completed but no image was extracted. Debug: {json.dumps(debug_info)}",
+                },
+            }
+    except Exception as exc:
         yield {
             "type": "error",
             "payload": {
                 "agent": "FinancialVisualizationAgent",
-                "message": "ImageGenerationTool completed without an extractable image payload.",
+                "message": str(exc),
             },
         }
-    except Exception as exc:
-        yield {
-            "type": "error",
-            "payload": {"agent": "FinancialVisualizationAgent", "message": str(exc)},
-        }
 
 
-def compact_visualization_data(collected_data: dict[str, Any]) -> dict[str, Any]:
-    compact: dict[str, Any] = {}
-    for key, value in collected_data.items():
-        compact[key] = limit_nested_lists(to_jsonable(value), max_items=12)
-    return compact
+def _extract_chart_data(context: str) -> str:
+    """Pull numeric-heavy lines from chat history for the visualization agent."""
+    lines = [line.strip() for line in context.splitlines() if line.strip()]
+    numeric_lines = [line for line in lines if re.search(r"\d", line)]
+    source_lines = numeric_lines or lines
+    summary = "\n".join(source_lines[-24:])
+    return summary[-3000:] if summary else "No numerical data found in chat history."
 
 
-def limit_nested_lists(value: Any, max_items: int) -> Any:
-    if isinstance(value, list):
-        if len(value) <= max_items:
-            return [limit_nested_lists(item, max_items) for item in value]
-        return {
-            "first": [limit_nested_lists(item, max_items) for item in value[: max_items // 2]],
-            "last": [limit_nested_lists(item, max_items) for item in value[-max_items // 2 :]],
-            "omitted_items": len(value) - max_items,
-        }
-    if isinstance(value, dict):
-        return {key: limit_nested_lists(item, max_items) for key, item in value.items()}
-    return value
+# ---------------------------------------------------------------------------
+# Event normalization
+# ---------------------------------------------------------------------------
 
-
-def mcp_args_for_tool(tool_name: str, stock: str) -> dict[str, Any]:
-    if tool_name == "calculate_moving_average":
-        return {"stock_id": stock, "days": 20}
-    return {"stock_id": stock}
-
-
-async def call_mcp_tool(
-    mcp_servers: list[MCPServer],
-    tool_name: str,
-    arguments: dict[str, Any],
-) -> Any:
-    server = await find_server_for_tool(mcp_servers, tool_name)
-    if server is None:
-        raise RuntimeError(f"MCP tool {tool_name} is not available.")
-    result = await server.call_tool(tool_name, arguments)
-    return to_jsonable(result)
-
-
-async def find_server_for_tool(mcp_servers: list[MCPServer], tool_name: str) -> MCPServer | None:
-    for server in mcp_servers:
-        cached_tools = server.cached_tools
-        tools = cached_tools if cached_tools is not None else await server.list_tools()
-        if any(tool.name == tool_name for tool in tools):
-            return server
-    return None
-
-
-async def normalize_agent_event(event: Any) -> AsyncIterator[dict[str, Any]]:
+async def _normalize_agent_event(event: Any) -> AsyncIterator[dict[str, Any]]:
+    """Convert OpenAI Agents SDK stream events into our NDJSON contract."""
     if event.type == "raw_response_event":
         data = event.data
         if isinstance(data, ResponseTextDeltaEvent):
@@ -298,7 +218,7 @@ async def normalize_agent_event(event: Any) -> AsyncIterator[dict[str, Any]]:
         if "reasoning" in event_type:
             yield {
                 "type": "reasoning_event",
-                "payload": {"event_type": event_type, "data": to_jsonable(data)},
+                "payload": {"event_type": event_type, "data": _to_jsonable(data)},
             }
         return
 
@@ -306,89 +226,156 @@ async def normalize_agent_event(event: Any) -> AsyncIterator[dict[str, Any]]:
         if "reasoning" in event.name:
             yield {
                 "type": "reasoning_event",
-                "payload": {"event_type": event.name, "item": to_jsonable(event.item)},
+                "payload": {"event_type": event.name, "item": _to_jsonable(event.item)},
             }
             return
 
         if event.name == "tool_called" and isinstance(event.item, ToolCallItem):
             yield {
                 "type": "tool_called",
-                "payload": {"item": to_jsonable(event.item.raw_item)},
+                "payload": {"item": _to_jsonable(event.item.raw_item)},
             }
             return
 
         if event.name == "tool_output" and isinstance(event.item, ToolCallOutputItem):
             yield {
                 "type": "tool_output",
-                "payload": {"output": to_jsonable(event.item.output)},
+                "payload": {"output": _to_jsonable(event.item.output)},
             }
             return
 
 
+# ---------------------------------------------------------------------------
+# Backward-compatible helpers (used by tests)
+# ---------------------------------------------------------------------------
+
 def coerce_specialist_result(value: Any) -> SpecialistResult:
-    """Backward-compatible helper for existing tests and callers."""
     if isinstance(value, SpecialistResult):
         return value
     if isinstance(value, dict):
         return SpecialistResult.model_validate(value)
-    return SpecialistResult(summary=stringify_output(value), confidence="medium")
+    return SpecialistResult(summary=_stringify_output(value), confidence="medium")
 
 
 def serialize_results(results: dict[str, SpecialistResult]) -> dict[str, Any]:
-    """Backward-compatible helper for existing tests and callers."""
     return {key: value.model_dump(mode="json") for key, value in results.items()}
 
 
-def stringify_output(value: Any) -> str:
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _stringify_output(value: Any) -> str:
     if isinstance(value, str):
         return value
     if hasattr(value, "model_dump"):
         return json.dumps(value.model_dump(mode="json"), ensure_ascii=False, indent=2)
-    return json.dumps(to_jsonable(value), ensure_ascii=False, indent=2)
+    return json.dumps(_to_jsonable(value), ensure_ascii=False, indent=2)
 
 
-def extract_image_payload(result: Any) -> dict[str, Any] | None:
-    data = {
-        "final_output": to_jsonable(getattr(result, "final_output", None)),
-        "new_items": to_jsonable(getattr(result, "new_items", [])),
-        "raw_responses": to_jsonable(getattr(result, "raw_responses", [])),
-    }
-    image_result = find_image_generation_result(data)
-    if not image_result:
-        return None
-    image_url = f"data:image/png;base64,{image_result}"
-    return {
-        "b64_json": image_result,
-        "image_url": image_url,
-        "mime_type": "image/png",
-    }
+def _extract_image_payload(result: Any) -> dict[str, Any] | None:
+    """Extract base64 image data from an Agents SDK RunResult.
 
+    The ImageGenerationTool produces an ``image_generation_call`` output item
+    in the Responses API.  It can appear in:
+    - ``result.raw_responses[*].output[*]``  (raw API response objects)
+    - ``result.new_items[*].raw_item``       (SDK RunItem wrappers)
+    - ``result.final_output``                (if the agent returns it directly)
 
-def find_image_generation_result(value: Any) -> str | None:
-    if isinstance(value, dict):
-        if value.get("type") == "image_generation_call" and isinstance(value.get("result"), str):
-            return value["result"]
-        for item in value.values():
-            found = find_image_generation_result(item)
-            if found:
-                return found
-    if isinstance(value, list):
-        for item in value:
-            found = find_image_generation_result(item)
-            if found:
-                return found
+    We recursively search all of these, converting Pydantic models and
+    dataclasses to dicts first so the recursive dict/list walker can find
+    the ``{"type": "image_generation_call", "result": "<base64>"}`` node.
+    """
+    # Collect all searchable surfaces
+    surfaces: list[Any] = []
+
+    # raw_responses: list of ModelResponse objects
+    for resp in getattr(result, "raw_responses", []) or []:
+        # Each ModelResponse has an .output list
+        output = getattr(resp, "output", None)
+        if output:
+            surfaces.append(output)
+        # Also try the full response object
+        surfaces.append(resp)
+
+    # new_items: list of RunItem wrappers (ToolCallItem, ToolCallOutputItem, etc.)
+    for item in getattr(result, "new_items", []) or []:
+        raw = getattr(item, "raw_item", None)
+        if raw is not None:
+            surfaces.append(raw)
+        # ToolCallOutputItem has .output
+        output = getattr(item, "output", None)
+        if output is not None:
+            surfaces.append(output)
+
+    # final_output
+    final = getattr(result, "final_output", None)
+    if final is not None:
+        surfaces.append(final)
+
+    # Convert everything to JSON-safe dicts and search
+    for surface in surfaces:
+        jsonable = _to_jsonable(surface)
+        b64 = _find_image_generation_result(jsonable)
+        if b64:
+            return {
+                "b64_json": b64,
+                "image_url": f"data:image/png;base64,{b64}",
+                "mime_type": "image/png",
+            }
+
     return None
 
 
-def to_jsonable(value: Any) -> Any:
+def _find_image_generation_result(value: Any) -> str | None:
+    """Recursively search for a base64 image string in a JSON-safe structure.
+
+    Looks for:
+    - ``{"type": "image_generation_call", "result": "<base64>"}``
+    - Any dict with a ``"b64_json"`` key containing a long base64 string
+    """
+    if isinstance(value, dict):
+        # Direct match: Responses API image_generation_call
+        if value.get("type") == "image_generation_call" and isinstance(value.get("result"), str):
+            result_val = value["result"]
+            if len(result_val) > 100:  # base64 images are large
+                return result_val
+
+        # Alternative: some SDK versions use b64_json
+        if isinstance(value.get("b64_json"), str) and len(value["b64_json"]) > 100:
+            return value["b64_json"]
+
+        # Recurse into all values
+        for item in value.values():
+            found = _find_image_generation_result(item)
+            if found:
+                return found
+
+    if isinstance(value, list):
+        for item in value:
+            found = _find_image_generation_result(item)
+            if found:
+                return found
+
+    # Handle long strings that look like base64 (fallback for edge cases)
+    if isinstance(value, str) and len(value) > 1000:
+        # Check if it looks like base64 (only alphanumeric + /+=)
+        import re
+        if re.fullmatch(r"[A-Za-z0-9+/=\s]+", value[:200]):
+            return value
+
+    return None
+
+
+def _to_jsonable(value: Any) -> Any:
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json")
     if is_dataclass(value) and not isinstance(value, type):
-        return to_jsonable(asdict(value))
+        return _to_jsonable(asdict(value))
     if isinstance(value, dict):
-        return {str(key): to_jsonable(item) for key, item in value.items()}
+        return {str(key): _to_jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
-        return [to_jsonable(item) for item in value]
+        return [_to_jsonable(item) for item in value]
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
