@@ -1,0 +1,48 @@
+services:
+  arithmetic-mcp-fastmcp:
+    build:
+      context: ./mcp-arithmetic
+    image: arithmetic-mcp-fastmcp:latest
+    container_name: arithmetic-mcp-fastmcp
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+
+  twstock-mcp-fastmcp:
+    build:
+      context: ./mcp-twstock
+    image: twstock-mcp-fastmcp:latest
+    container_name: twstock-mcp-fastmcp
+    ports:
+      - "8081:8081"
+    environment:
+      PORT: "8081"
+
+  chat-api:
+    build:
+      context: ./backend
+    image: arithmetic-mcp-chat-api:latest
+    container_name: arithmetic-mcp-chat-api
+    depends_on:
+      - arithmetic-mcp-fastmcp
+      - twstock-mcp-fastmcp
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    environment:
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5-mini}
+      MCP_HTTP_URL: http://arithmetic-mcp-fastmcp:8080/mcp
+      TWSTOCK_MCP_HTTP_URL: http://twstock-mcp-fastmcp:8081/mcp
+      CORS_ALLOW_ORIGINS: "*"
+
+  chat-web:
+    build:
+      context: ./frontend
+    image: arithmetic-mcp-chat-web:latest
+    container_name: arithmetic-mcp-chat-web
+    depends_on:
+      - chat-api
+    ports:
+      - "5173:5173"
