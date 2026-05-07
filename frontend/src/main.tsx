@@ -5,10 +5,14 @@ import {
   CheckCircle2,
   ChevronDown,
   CircleHelp,
+  Compass,
   Loader2,
+  Mic,
   Send,
   Server,
+  ShieldCheck,
   TerminalSquare,
+  WandSparkles,
   Wrench,
 } from "lucide-react";
 import "./styles.css";
@@ -37,6 +41,20 @@ interface GeneratedImage {
   imageUrl?: string;
 }
 
+interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  instructions: string;
+  is_active: boolean;
+}
+
+interface SkillDraft {
+  name: string;
+  description: string;
+  instructions: string;
+}
+
 interface ExamplePrompt {
   label: string;
   category: string;
@@ -51,7 +69,7 @@ interface GuidedExample {
   prompts: [ExamplePrompt, ExamplePrompt];
 }
 
-type Workflow = "chat" | "financial";
+type Workflow = "chat" | "financial" | "agentic";
 
 interface ActiveGuide {
   flowId: string;
@@ -67,6 +85,13 @@ interface TutorialStep {
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 const TUTORIAL_STORAGE_KEY = "mcpChatTutorialDismissed";
+const MAX_SELECTED_SKILLS = 5;
+const SKILLS_PAGE_SIZE = 4;
+const EMPTY_SKILL_DRAFT: SkillDraft = {
+  name: "",
+  description: "",
+  instructions: "",
+};
 
 const GUIDED_EXAMPLES: GuidedExample[] = [
   {
@@ -150,15 +175,15 @@ const TUTORIAL_STEPS: TutorialStep[] = [
   },
   {
     title: "Watch the workflow",
-    body: "The backend collects structured stock data, then streams one analyst agent's response.",
+    body: "Selected skills run as specialist agents, then the manager streams a synthesized answer.",
   },
   {
     title: "Review aggregated results",
-    body: "The analyst uses the collected data and available tools to answer the specific question.",
+    body: "Specialist lifecycle and tool events appear in the event history as the task runs.",
   },
   {
     title: "Try a selective analysis",
-    body: "Ask for only specific dimensions and the request parser will narrow the scope.",
+    body: "Mark must-run skills when needed; otherwise the manager can pick relevant skills automatically.",
   },
 ];
 
@@ -179,6 +204,18 @@ function App() {
   const [activeGuide, setActiveGuide] = useState<ActiveGuide | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [status, setStatus] = useState("Ready");
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
+  const [skillDraft, setSkillDraft] = useState<SkillDraft>(EMPTY_SKILL_DRAFT);
+  const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
+  const [skillError, setSkillError] = useState("");
+  const [showSkillEditor, setShowSkillEditor] = useState(false);
+  const [skillPage, setSkillPage] = useState(0);
+  const [isDraftingSkill, setIsDraftingSkill] = useState(false);
+  const [showApiKeyPanel, setShowApiKeyPanel] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
+  const [apiKeyMessage, setApiKeyMessage] = useState("");
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const eventOrderRef = useRef(0);
   const streamingRef = useRef(false);
@@ -188,6 +225,16 @@ function App() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
+
+  useEffect(() => {
+    loadSkills();
+    loadOpenAIKeyStatus();
+  }, []);
+
+  useEffect(() => {
+    const maxPage = Math.max(0, Math.ceil(skills.length / SKILLS_PAGE_SIZE) - 1);
+    setSkillPage((current) => Math.min(current, maxPage));
+  }, [skills.length]);
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -227,10 +274,14 @@ function App() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await submitPrompt(input);
+    await submitPrompt(input, undefined, "agentic");
   }
 
-  async function submitPrompt(prompt: string, guideAction?: { flowId: string; stepIndex: number; workflow: Workflow }) {
+  async function submitPrompt(
+    prompt: string,
+    guideAction?: { flowId: string; stepIndex: number; workflow: Workflow },
+    workflowOverride?: Workflow,
+  ) {
     const trimmed = prompt.trim();
     if (!trimmed || streamingRef.current) {
       return;
@@ -249,7 +300,7 @@ function App() {
       content: "",
     };
     const nextMessages = [...messages, userMessage, assistantMessage];
-    const workflow = guideAction?.workflow ?? inferWorkflow(trimmed);
+    const workflow = workflowOverride ?? guideAction?.workflow ?? inferWorkflow(trimmed);
 
     if (guideAction) {
       setActiveGuide({ ...guideAction, status: "streaming" });
@@ -260,11 +311,12 @@ function App() {
     setStatus("Streaming");
 
     let completed = false;
+    let streamErrored = false;
     try {
       const response = await fetch(`${API_BASE}${endpointForWorkflow(workflow)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payloadForWorkflow(workflow, trimmed, nextMessages)),
+        body: JSON.stringify(payloadForWorkflow(workflow, trimmed, nextMessages, selectedSkillIds)),
       });
 
       if (!response.ok || !response.body) {
@@ -272,10 +324,14 @@ function App() {
       }
 
       await readNdjsonStream(response.body, (payload) => {
-        processStreamPayload(payload, assistantId);
+        streamErrored = processStreamPayload(payload, assistantId) || streamErrored;
       });
-      completed = true;
-      setStatus("Complete");
+      if (streamErrored) {
+        setStatus("Error");
+      } else {
+        completed = true;
+        setStatus("Complete");
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       appendAssistantText(assistantId, `\n\n${message}`);
@@ -295,13 +351,172 @@ function App() {
     }
   }
 
-  function processStreamPayload(payload: Record<string, unknown>, assistantId: string) {
+  async function loadSkills() {
+    try {
+      const response = await fetch(`${API_BASE}/api/skills`);
+      if (!response.ok) {
+        throw new Error(`Skill load failed with HTTP ${response.status}`);
+      }
+      const data = (await response.json()) as Skill[];
+      setSkills(data);
+      setSelectedSkillIds((current) => current.filter((id) => data.some((skill) => skill.id === id)));
+      setSkillError("");
+    } catch (error) {
+      setSkillError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function loadOpenAIKeyStatus() {
+    try {
+      const response = await fetch(`${API_BASE}/api/settings/openai-key`);
+      if (!response.ok) {
+        return;
+      }
+      const data = (await response.json()) as { configured: boolean };
+      setApiKeyConfigured(data.configured);
+    } catch {
+      // Non-critical status check; stream errors still surface the setup panel.
+    }
+  }
+
+  async function saveOpenAIKey() {
+    const apiKey = apiKeyInput.trim();
+    if (!apiKey) {
+      setApiKeyMessage("Paste an OpenAI API key first.");
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE}/api/settings/openai-key`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: apiKey }),
+      });
+      if (!response.ok) {
+        throw new Error(`API key save failed with HTTP ${response.status}`);
+      }
+      setApiKeyInput("");
+      setApiKeyConfigured(true);
+      setApiKeyMessage("API key is set for this backend session.");
+      setShowApiKeyPanel(false);
+    } catch (error) {
+      setApiKeyMessage(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function saveSkill() {
+    const name = skillDraft.name.trim();
+    const instructions = skillDraft.instructions.trim();
+    if (!name || !instructions) {
+      setSkillError("Skill name and instructions are required.");
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE}/api/skills${editingSkillId ? `/${editingSkillId}` : ""}`, {
+        method: editingSkillId ? "PUT" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...skillDraft,
+          name,
+          instructions,
+          description: skillDraft.description.trim(),
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`Skill save failed with HTTP ${response.status}`);
+      }
+      setSkillDraft(EMPTY_SKILL_DRAFT);
+      setEditingSkillId(null);
+      setShowSkillEditor(false);
+      await loadSkills();
+    } catch (error) {
+      setSkillError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function deleteSkill(id: string) {
+    try {
+      const response = await fetch(`${API_BASE}/api/skills/${id}`, { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error(`Skill delete failed with HTTP ${response.status}`);
+      }
+      setSelectedSkillIds((current) => current.filter((skillId) => skillId !== id));
+      await loadSkills();
+    } catch (error) {
+      setSkillError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function editSkill(skill: Skill) {
+    setEditingSkillId(skill.id);
+    setSkillDraft({
+      name: skill.name,
+      description: skill.description,
+      instructions: skill.instructions,
+    });
+    setShowSkillEditor(true);
+  }
+
+  function toggleSkill(id: string) {
+    if (!selectedSkillIds.includes(id) && selectedSkillIds.length >= MAX_SELECTED_SKILLS) {
+      setSkillError(`Select up to ${MAX_SELECTED_SKILLS} skills for one run.`);
+      return;
+    }
+    setSelectedSkillIds((current) => {
+      if (current.includes(id)) {
+        return current.filter((skillId) => skillId !== id);
+      }
+      setSkillError("");
+      return [...current, id];
+    });
+  }
+
+  function newSkill() {
+    setEditingSkillId(null);
+    setSkillDraft(EMPTY_SKILL_DRAFT);
+    setShowSkillEditor(true);
+  }
+
+  async function draftSkill() {
+    const prompt = input.trim() || skillDraft.description.trim() || skillDraft.name.trim();
+    if (!prompt) {
+      setSkillError("Describe the skill you want to draft first.");
+      return;
+    }
+
+    setIsDraftingSkill(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/skills/draft`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt,
+          context: financialContext(messages),
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`Skill draft failed with HTTP ${response.status}`);
+      }
+      const draft = (await response.json()) as SkillDraft;
+      setSkillDraft(draft);
+      setEditingSkillId(null);
+      setShowSkillEditor(true);
+      setSkillError("");
+    } catch (error) {
+      setSkillError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsDraftingSkill(false);
+    }
+  }
+
+  function processStreamPayload(payload: Record<string, unknown>, assistantId: string): boolean {
     const type = String(payload.type ?? "event");
 
     if (type === "text_delta") {
       const delta = String(payload.delta ?? "");
       appendAssistantText(assistantId, delta);
-      return;
+      return false;
     }
 
     if (type === "reasoning_delta") {
@@ -309,32 +524,87 @@ function App() {
       if (delta.trim()) {
         appendEvent(assistantId, type, "Reasoning", delta);
       }
-      return;
+      return false;
     }
 
     if (type === "tool_called") {
       appendEvent(assistantId, type, "Tool called", summarize(payload.item));
-      return;
+      return false;
     }
 
     if (type === "tool_output") {
       appendEvent(assistantId, type, "Tool output", summarize(payload.output));
-      return;
+      return false;
     }
 
     if (type === "agent_started") {
       appendEvent(assistantId, type, `Agent started: ${String(payload.agent ?? "unknown")}`, summarize(payload));
-      return;
+      return false;
     }
 
     if (type === "agent_completed") {
       appendEvent(assistantId, type, `Agent completed: ${String(payload.agent ?? "unknown")}`, summarize(payload));
-      return;
+      return false;
+    }
+
+    if (type === "manager_started") {
+      appendEvent(assistantId, type, "Manager started", summarize(payload));
+      return false;
+    }
+
+    if (type === "manager_planning_started") {
+      appendEvent(assistantId, type, "Manager planning started", summarize(payload));
+      return false;
+    }
+
+    if (type === "execution_plan_created") {
+      appendEvent(assistantId, type, "Execution plan created", summarize(payload));
+      return false;
+    }
+
+    if (type === "skill_selected_by_manager") {
+      appendEvent(
+        assistantId,
+        type,
+        `Manager selected: ${String(payload.skill_name ?? payload.skill_id ?? "skill")}`,
+        summarize(payload),
+      );
+      return false;
+    }
+
+    if (type === "skill_skipped_by_manager") {
+      appendEvent(
+        assistantId,
+        type,
+        `Manager skipped: ${String(payload.skill_name ?? payload.skill_id ?? "skill")}`,
+        summarize(payload),
+      );
+      return false;
+    }
+
+    if (type === "no_relevant_skills") {
+      appendEvent(assistantId, type, "No matching skills", summarize(payload));
+      return false;
+    }
+
+    if (type === "manager_completed") {
+      appendEvent(assistantId, type, "Manager completed", summarize(payload));
+      return false;
+    }
+
+    if (type === "specialist_started") {
+      appendEvent(assistantId, type, `Specialist started: ${String(payload.agent ?? "unknown")}`, summarize(payload));
+      return false;
+    }
+
+    if (type === "specialist_completed") {
+      appendEvent(assistantId, type, `Specialist completed: ${String(payload.agent ?? "unknown")}`, summarize(payload));
+      return false;
     }
 
     if (type === "source_found") {
       appendEvent(assistantId, type, `Source: ${String(payload.title ?? payload.url ?? "source")}`, summarize(payload));
-      return;
+      return false;
     }
 
     if (type === "image_generated") {
@@ -344,25 +614,38 @@ function App() {
         description: String(payload.description ?? ""),
         imageUrl: imageUrlFromPayload(payload.image),
       });
-      return;
+      return false;
     }
 
     if (type === "mcp_ready") {
-      return;
+      return false;
     }
 
     if (type === "done") {
-      return;
+      return false;
     }
 
     if (type === "error") {
-      appendEvent(assistantId, type, "Backend error", String(payload.message ?? "Unknown error"));
-      return;
+      const message = String(payload.message ?? "Unknown error");
+      if (message.includes("OPENAI_API_KEY")) {
+        setShowApiKeyPanel(true);
+        setApiKeyConfigured(false);
+        setApiKeyMessage("Open the compass button under the chat input and paste your OpenAI API key.");
+        appendAssistantText(
+          assistantId,
+          "\n\nOpenAI API key is missing. Use the compass button under the chat input to paste your key, then run the request again.",
+        );
+      } else {
+        appendAssistantText(assistantId, `\n\n${message}`);
+      }
+      appendEvent(assistantId, type, "Backend error", message);
+      return true;
     }
 
     if (type === "reasoning_event") {
       appendEvent(assistantId, type, "Reasoning event", summarize(payload));
     }
+    return false;
   }
 
   function appendAssistantText(id: string, delta: string) {
@@ -481,37 +764,115 @@ function App() {
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask for arithmetic that should use MCP tools…"
-                rows={3}
+                placeholder="Ask for analysis, arithmetic, or a Taiwan stock lookup…"
+                rows={2}
               />
-              <button type="submit" disabled={isStreaming || !input.trim()} aria-label="Send message">
-                <Send size={16} />
-                Send
-              </button>
+              <div className={`api-key-panel ${showApiKeyPanel ? "open" : ""}`} aria-hidden={!showApiKeyPanel}>
+                <div>
+                  <strong>OpenAI API key</strong>
+                  <small>
+                    {apiKeyConfigured
+                      ? "A key is configured for this backend session."
+                      : "Required for agent responses, skill drafts, WebSearch, and ImageGeneration."}
+                  </small>
+                </div>
+                <div className="api-key-controls">
+                  <input
+                    type="password"
+                    value={apiKeyInput}
+                    onChange={(event) => setApiKeyInput(event.target.value)}
+                    placeholder="sk-..."
+                    autoComplete="off"
+                  />
+                  <button type="button" onClick={saveOpenAIKey}>
+                    Save key
+                  </button>
+                </div>
+                {apiKeyMessage ? <p>{apiKeyMessage}</p> : null}
+              </div>
+              <div className="composer-toolbar" aria-label="Composer controls">
+                <div className="composer-tools">
+                  <button
+                    type="button"
+                    className={`composer-icon-button compass-button ${showApiKeyPanel ? "open" : ""}`}
+                    aria-label="Open API key settings"
+                    aria-expanded={showApiKeyPanel}
+                    onClick={() => setShowApiKeyPanel((current) => !current)}
+                  >
+                    <Compass size={18} />
+                  </button>
+                  <span className="composer-mode-pill">
+                    <ShieldCheck size={14} />
+                    {selectedSkillIds.length > 0 ? `${selectedSkillIds.length} required skills` : "Manager auto-pick"}
+                    <ChevronDown size={14} />
+                  </span>
+                </div>
+                <div className="composer-actions">
+                  <span className="composer-model-pill">Manager agent</span>
+                  <button type="button" className="composer-icon-button" aria-label="Voice input">
+                    <Mic size={16} />
+                  </button>
+                  <button
+                    type="submit"
+                    className="composer-send-button"
+                    disabled={isStreaming || !input.trim()}
+                    aria-label="Send message"
+                  >
+                    <Send size={17} />
+                    <span>Send</span>
+                  </button>
+                </div>
+              </div>
             </form>
           </section>
 
-          <aside className="event-panel" aria-label="Reasoning and tool event history">
-            <section className="history-section">
-              <div className="panel-title">
-                <Brain size={15} />
-                Event History
-              </div>
-              <div className="event-list">
-                {allEvents(currentEvent, eventHistory).length === 0 ? (
-                  <p className="empty-event">Reasoning and tool events will appear here.</p>
-                ) : (
-                  groupedEvents(allEvents(currentEvent, eventHistory), messages).map((group) => (
-                    <RoundEventGroup
-                      key={group.messageId}
-                      group={group}
-                      currentEventId={currentEvent?.id}
-                      collapsed={collapsedRounds.has(group.messageId)}
-                      onToggle={() => toggleRound(group.messageId)}
-                    />
-                  ))
-                )}
-              </div>
+          <aside className="side-panel" aria-label="Task setup and event history">
+            <SkillWorkbench
+              skills={skills}
+              selectedSkillIds={selectedSkillIds}
+              skillDraft={skillDraft}
+              editingSkillId={editingSkillId}
+              showEditor={showSkillEditor}
+              error={skillError}
+              page={skillPage}
+              isDrafting={isDraftingSkill}
+              onToggleSkill={toggleSkill}
+              onEditSkill={editSkill}
+              onDeleteSkill={deleteSkill}
+              onNewSkill={newSkill}
+              onDraftSkill={draftSkill}
+              onPageChange={setSkillPage}
+              onCancelEdit={() => {
+                setShowSkillEditor(false);
+                setEditingSkillId(null);
+                setSkillDraft(EMPTY_SKILL_DRAFT);
+              }}
+              onDraftChange={setSkillDraft}
+              onSaveSkill={saveSkill}
+            />
+
+            <section className="event-panel" aria-label="Reasoning and tool event history">
+              <section className="history-section">
+                <div className="panel-title">
+                  <Brain size={15} />
+                  Event History
+                </div>
+                <div className="event-list">
+                  {allEvents(currentEvent, eventHistory).length === 0 ? (
+                    <p className="empty-event">Reasoning and tool events will appear here.</p>
+                  ) : (
+                    groupedEvents(allEvents(currentEvent, eventHistory), messages).map((group) => (
+                      <RoundEventGroup
+                        key={group.messageId}
+                        group={group}
+                        currentEventId={currentEvent?.id}
+                        collapsed={collapsedRounds.has(group.messageId)}
+                        onToggle={() => toggleRound(group.messageId)}
+                      />
+                    ))
+                  )}
+                </div>
+              </section>
             </section>
           </aside>
         </div>
@@ -530,6 +891,145 @@ function App() {
       return next;
     });
   }
+}
+
+function SkillWorkbench({
+  skills,
+  selectedSkillIds,
+  skillDraft,
+  editingSkillId,
+  showEditor,
+  error,
+  page,
+  isDrafting,
+  onToggleSkill,
+  onEditSkill,
+  onDeleteSkill,
+  onNewSkill,
+  onDraftSkill,
+  onPageChange,
+  onCancelEdit,
+  onDraftChange,
+  onSaveSkill,
+}: {
+  skills: Skill[];
+  selectedSkillIds: string[];
+  skillDraft: SkillDraft;
+  editingSkillId: string | null;
+  showEditor: boolean;
+  error: string;
+  page: number;
+  isDrafting: boolean;
+  onToggleSkill: (id: string) => void;
+  onEditSkill: (skill: Skill) => void;
+  onDeleteSkill: (id: string) => void;
+  onNewSkill: () => void;
+  onDraftSkill: () => void;
+  onPageChange: (page: number) => void;
+  onCancelEdit: () => void;
+  onDraftChange: (draft: SkillDraft) => void;
+  onSaveSkill: () => void;
+}) {
+  const pageCount = Math.max(1, Math.ceil(skills.length / SKILLS_PAGE_SIZE));
+  const safePage = Math.min(page, pageCount - 1);
+  const visibleSkills = skills.slice(safePage * SKILLS_PAGE_SIZE, safePage * SKILLS_PAGE_SIZE + SKILLS_PAGE_SIZE);
+
+  return (
+    <section className="skill-workbench" aria-label="Agentic skills">
+      <div className="skill-header">
+        <div>
+          <span className="section-kicker">Required skills</span>
+          <strong>{selectedSkillIds.length} required · manager can add more</strong>
+        </div>
+        <button type="button" onClick={onNewSkill}>
+          New skill
+        </button>
+      </div>
+
+      {error ? <p className="skill-error">{error}</p> : null}
+
+      <div className="skill-list">
+        {visibleSkills.map((skill) => {
+          const selected = selectedSkillIds.includes(skill.id);
+          const disabled = !selected && selectedSkillIds.length >= MAX_SELECTED_SKILLS;
+          return (
+            <article className={`skill-row ${selected ? "selected" : ""}`} key={skill.id}>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={selected}
+                  disabled={disabled}
+                  onChange={() => onToggleSkill(skill.id)}
+                />
+                <span>
+                  <strong>{skill.name}</strong>
+                  <small>{skill.description}</small>
+                </span>
+              </label>
+              <div className="skill-actions">
+                <button type="button" onClick={() => onEditSkill(skill)}>
+                  Edit
+                </button>
+                <button type="button" onClick={() => onDeleteSkill(skill.id)}>
+                  Delete
+                </button>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+
+      <div className="skill-pagination" aria-label="Skill pagination">
+        <button type="button" onClick={() => onPageChange(Math.max(0, safePage - 1))} disabled={safePage === 0}>
+          Prev
+        </button>
+        <span>
+          Page {safePage + 1} / {pageCount}
+        </span>
+        <button
+          type="button"
+          onClick={() => onPageChange(Math.min(pageCount - 1, safePage + 1))}
+          disabled={safePage >= pageCount - 1}
+        >
+          Next
+        </button>
+      </div>
+
+
+      {showEditor ? (
+        <div className="skill-editor">
+          <input
+            value={skillDraft.name}
+            onChange={(event) => onDraftChange({ ...skillDraft, name: event.target.value })}
+            placeholder="Skill name"
+          />
+          <input
+            value={skillDraft.description}
+            onChange={(event) => onDraftChange({ ...skillDraft, description: event.target.value })}
+            placeholder="Short description"
+          />
+          <textarea
+            value={skillDraft.instructions}
+            onChange={(event) => onDraftChange({ ...skillDraft, instructions: event.target.value })}
+            placeholder="Specialist instructions"
+            rows={5}
+          />
+          <div className="skill-editor-actions">
+            <button type="button" onClick={onCancelEdit}>
+              Cancel
+            </button>
+            <button type="button" onClick={onDraftSkill} disabled={isDrafting}>
+              {isDrafting ? <Loader2 className="spin" size={14} /> : <WandSparkles size={14} />}
+              Generate draft
+            </button>
+            <button type="button" onClick={onSaveSkill}>
+              {editingSkillId ? "Save changes" : "Create skill"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
 }
 
 function TutorialPanel({
@@ -628,11 +1128,19 @@ function GuidedStarter({
       </div>
       <div className="starter-grid">
         {examples.map((example) => (
-          <button key={example.id} type="button" onClick={() => onStart(example)}>
-            <span>{example.prompts[0].category}</span>
+          <button
+            key={example.id}
+            type="button"
+            onClick={() => onStart(example)}
+            title={`${example.summary}\n\n${example.prompts[0].prompt}`}
+          >
+            <span className="starter-card-top">
+              <span>{example.prompts[0].category}</span>
+              <CircleHelp size={13} aria-hidden="true" />
+            </span>
             <strong>{example.title}</strong>
-            <small>{example.summary}</small>
-            <em>{example.prompts[0].prompt}</em>
+            <small title={example.summary}>{example.summary}</small>
+            <em title={example.prompts[0].prompt}>{example.prompts[0].prompt}</em>
           </button>
         ))}
       </div>
@@ -747,10 +1255,23 @@ function roundIndex(messageId: string, messages: Message[]): number {
 }
 
 function endpointForWorkflow(workflow: Workflow): string {
+  if (workflow === "agentic") {
+    return "/api/agentic-task/stream";
+  }
   return workflow === "financial" ? "/api/financial-analysis/stream" : "/api/chat/stream";
 }
 
-function payloadForWorkflow(workflow: Workflow, prompt: string, messages: Message[]) {
+function payloadForWorkflow(workflow: Workflow, prompt: string, messages: Message[], selectedSkillIds: string[]) {
+  if (workflow === "agentic") {
+    return {
+      prompt,
+      skill_ids: selectedSkillIds,
+      required_skill_ids: selectedSkillIds,
+      stock: extractStockInput(prompt, messages),
+      context: financialContext(messages),
+    };
+  }
+
   if (workflow === "financial") {
     return {
       stock: extractStockInput(prompt, messages),

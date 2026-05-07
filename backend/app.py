@@ -8,7 +8,7 @@ from agents import Agent, ModelSettings, Runner
 from agents.items import ToolCallItem, ToolCallOutputItem
 from agents.mcp import MCPServerStreamableHttp
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from openai.types.responses import (
@@ -17,8 +17,23 @@ from openai.types.responses import (
     ResponseTextDeltaEvent,
 )
 from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from financial_agents import FinancialAnalysisRequest, run_financial_analysis
+from skill_agents import (
+    AgenticTaskRequest,
+    SkillCreate,
+    SkillDraftRequest,
+    SkillDraftResponse,
+    SkillRead,
+    SkillUpdate,
+    build_skill_draft,
+    run_agentic_task,
+)
+from skill_agents.db import get_session, initialize_database
+from skill_agents.models import Skill
 
 load_dotenv()
 
@@ -37,6 +52,10 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(default_factory=list)
 
 
+class OpenAIKeyRequest(BaseModel):
+    api_key: str = Field(..., min_length=1)
+
+
 app = FastAPI(title="Arithmetic MCP Chat API")
 app.add_middleware(
     CORSMiddleware,
@@ -47,9 +66,29 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+async def startup() -> None:
+    if os.getenv("SKILLS_DB_AUTO_INIT", "true").lower() == "true":
+        initialize_database()
+
+
 @app.get("/api/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/settings/openai-key")
+async def openai_key_status() -> dict[str, bool]:
+    return {"configured": openai_api_key_configured()}
+
+
+@app.post("/api/settings/openai-key")
+async def set_openai_key(payload: OpenAIKeyRequest) -> dict[str, bool]:
+    api_key = payload.api_key.strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API key is required.")
+    os.environ["OPENAI_API_KEY"] = api_key
+    return {"configured": True}
 
 
 @app.get("/api/mcp/tools")
@@ -99,6 +138,80 @@ async def financial_analysis_stream(request: FinancialAnalysisRequest) -> Stream
     )
 
 
+@app.get("/api/skills", response_model=list[SkillRead])
+async def list_skills(session: Session = Depends(get_session)) -> list[Skill]:
+    return list(session.scalars(select(Skill).where(Skill.is_active.is_(True)).order_by(Skill.created_at, Skill.name)))
+
+
+@app.post("/api/skills", response_model=SkillRead, status_code=status.HTTP_201_CREATED)
+async def create_skill(payload: SkillCreate, session: Session = Depends(get_session)) -> Skill:
+    skill = Skill(**payload.model_dump())
+    session.add(skill)
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(status_code=409, detail="A skill with this name already exists.") from exc
+    session.refresh(skill)
+    return skill
+
+
+@app.put("/api/skills/{skill_id}", response_model=SkillRead)
+async def update_skill(skill_id: str, payload: SkillUpdate, session: Session = Depends(get_session)) -> Skill:
+    skill = session.get(Skill, skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found.")
+
+    updates = payload.model_dump(exclude_unset=True)
+    for key, value in updates.items():
+        setattr(skill, key, value)
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(status_code=409, detail="A skill with this name already exists.") from exc
+    session.refresh(skill)
+    return skill
+
+
+@app.delete("/api/skills/{skill_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_skill(skill_id: str, session: Session = Depends(get_session)) -> None:
+    skill = session.get(Skill, skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found.")
+    skill.is_active = False
+    session.commit()
+
+
+@app.post("/api/skills/draft", response_model=SkillDraftResponse)
+async def draft_skill(payload: SkillDraftRequest) -> dict[str, str]:
+    if not openai_api_key_configured():
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not set on the backend service.")
+
+    try:
+        async with AsyncExitStack() as stack:
+            mcp_servers = [await stack.enter_async_context(server) for server in build_mcp_servers()]
+            return await build_skill_draft(payload.prompt, mcp_servers, context=payload.context)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/agentic-task/stream")
+async def agentic_task_stream(
+    request: AgenticTaskRequest,
+    session: Session = Depends(get_session),
+) -> StreamingResponse:
+    required_skills, active_skills = load_agentic_skills(session, request.required_skill_ids)
+    return StreamingResponse(
+        stream_agentic_task_events(request, required_skills, active_skills),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 def build_mcp_servers() -> list[MCPServerStreamableHttp]:
     return [
         MCPServerStreamableHttp(
@@ -118,8 +231,22 @@ def build_mcp_servers() -> list[MCPServerStreamableHttp]:
     ]
 
 
+def openai_api_key_configured() -> bool:
+    return bool(os.getenv("OPENAI_API_KEY"))
+
+
+def load_agentic_skills(session: Session, skill_ids: list[str]) -> tuple[list[Skill], list[Skill]]:
+    unique_ids = list(dict.fromkeys(skill_ids))
+    active_skills = list(session.scalars(select(Skill).where(Skill.is_active.is_(True)).order_by(Skill.created_at, Skill.name)))
+    by_id = {skill.id: skill for skill in active_skills}
+    missing_ids = [skill_id for skill_id in unique_ids if skill_id not in by_id]
+    if missing_ids:
+        raise HTTPException(status_code=400, detail=f"Unknown or inactive skill IDs: {', '.join(missing_ids)}")
+    return [by_id[skill_id] for skill_id in unique_ids], active_skills
+
+
 async def stream_agent_events(messages: list[ChatMessage]) -> AsyncIterator[str]:
-    if not os.getenv("OPENAI_API_KEY"):
+    if not openai_api_key_configured():
         yield encode_event(
             "error",
             {
@@ -181,7 +308,7 @@ async def stream_financial_analysis_events(
     question: str | None = None,
     context: str | None = None,
 ) -> AsyncIterator[str]:
-    if not os.getenv("OPENAI_API_KEY"):
+    if not openai_api_key_configured():
         yield encode_event(
             "error",
             {
@@ -204,6 +331,48 @@ async def stream_financial_analysis_events(
                 )
 
             async for event in run_financial_analysis(stock, mcp_servers, question=question, context=context):
+                yield encode_event(event["type"], event["payload"])
+
+            yield encode_event("done", {})
+    except Exception as exc:
+        yield encode_event("error", {"message": str(exc)})
+
+
+async def stream_agentic_task_events(
+    request: AgenticTaskRequest,
+    required_skills: list[Skill],
+    active_skills: list[Skill],
+) -> AsyncIterator[str]:
+    if not openai_api_key_configured():
+        yield encode_event(
+            "error",
+            {
+                "message": "OPENAI_API_KEY is not set on the backend service.",
+            },
+        )
+        return
+
+    try:
+        async with AsyncExitStack() as stack:
+            mcp_servers = [await stack.enter_async_context(server) for server in build_mcp_servers()]
+            for server in mcp_servers:
+                tools = await server.list_tools()
+                yield encode_event(
+                    "mcp_ready",
+                    {
+                        "server": server.name,
+                        "tools": [tool.name for tool in tools],
+                    },
+                )
+
+            async for event in run_agentic_task(
+                request.prompt,
+                required_skills,
+                active_skills,
+                mcp_servers,
+                stock=request.stock,
+                context=request.context,
+            ):
                 yield encode_event(event["type"], event["payload"])
 
             yield encode_event("done", {})

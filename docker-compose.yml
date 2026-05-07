@@ -1,4 +1,21 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: twstock-agents-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: twstock_agents
+      POSTGRES_USER: twstock
+      POSTGRES_PASSWORD: twstock
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U twstock -d twstock_agents"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - twstock-postgres-data:/var/lib/postgresql/data
+
   arithmetic-mcp-fastmcp:
     build:
       context: ./mcp-arithmetic
@@ -25,10 +42,15 @@ services:
     image: arithmetic-mcp-chat-api:latest
     container_name: arithmetic-mcp-chat-api
     depends_on:
-      - arithmetic-mcp-fastmcp
-      - twstock-mcp-fastmcp
+      postgres:
+        condition: service_healthy
+      arithmetic-mcp-fastmcp:
+        condition: service_started
+      twstock-mcp-fastmcp:
+        condition: service_started
     env_file:
-      - .env
+      - path: .env
+        required: false
     ports:
       - "8000:8000"
     environment:
@@ -37,6 +59,8 @@ services:
       FINANCIAL_ANALYSIS_WEB_CONTEXT: ${FINANCIAL_ANALYSIS_WEB_CONTEXT:-medium}
       OPENAI_IMAGE_MODEL: ${OPENAI_IMAGE_MODEL:-gpt-image-1}
       OPENAI_IMAGE_QUALITY: ${OPENAI_IMAGE_QUALITY:-low}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://twstock:twstock@postgres:5432/twstock_agents}
+      SKILLS_DB_AUTO_INIT: ${SKILLS_DB_AUTO_INIT:-true}
       MCP_HTTP_URL: http://arithmetic-mcp-fastmcp:8080/mcp
       TWSTOCK_MCP_HTTP_URL: http://twstock-mcp-fastmcp:8081/mcp
       CORS_ALLOW_ORIGINS: "*"
@@ -50,3 +74,6 @@ services:
       - chat-api
     ports:
       - "5173:5173"
+
+volumes:
+  twstock-postgres-data:

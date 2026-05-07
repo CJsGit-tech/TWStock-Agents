@@ -33,6 +33,8 @@ The React chatbot stack adds:
 - Chat UI: `http://localhost:5173`
 - Chat API: `http://localhost:8000/api/health`
 - Financial analysis stream: `POST http://localhost:8000/api/financial-analysis/stream`
+- Skill-backed agentic task stream: `POST http://localhost:8000/api/agentic-task/stream`
+- Skill CRUD API: `GET/POST/PUT/DELETE http://localhost:8000/api/skills`
 
 ## Run With Docker Compose
 
@@ -45,6 +47,7 @@ FINANCIAL_ANALYSIS_MODEL="gpt-5-mini"
 FINANCIAL_ANALYSIS_WEB_CONTEXT="medium"
 OPENAI_IMAGE_MODEL="gpt-image-1"
 OPENAI_IMAGE_QUALITY="low"
+DATABASE_URL="postgresql+psycopg://twstock:twstock@postgres:5432/twstock_agents"
 ```
 
 Only `OPENAI_API_KEY` is required. The other variables are optional.
@@ -76,16 +79,47 @@ docker compose down
 
 Open the frontend at `http://localhost:5173`.
 
-The Compose stack starts four services:
+The Compose stack starts five services:
 
+- `postgres`: Postgres database for user-created skills.
 - `arithmetic-mcp-fastmcp`: Python FastMCP arithmetic server.
 - `twstock-mcp-fastmcp`: Python FastMCP Taiwan stock server powered by `twstock`.
 - `chat-api`: Python FastAPI bridge using the OpenAI Agents SDK and the MCP server.
 - `chat-web`: React/Vite chatbot UI that streams reasoning, tool, and text events.
 
+## Skill-Backed Agentic Tasks
+
+The app supports dynamic specialist skills stored in Postgres. A skill contains a name, description, and reusable instructions. The UI can create/edit/delete skills, mark up to five skills as required, and submit a manager-planned workflow:
+
+```sh
+curl -N http://localhost:8000/api/agentic-task/stream \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"分析 2330 的估值與買進策略","stock":"2330","required_skill_ids":["..."]}'
+```
+
+The workflow:
+
+- Loads all active skills from Postgres.
+- Treats user-selected skills as required skills.
+- Lets a Manager Planner add relevant optional skills up to five total executed skills.
+- Gives every planner, specialist, manager, fallback, and skill-draft agent all available MCP servers plus WebSearch and ImageGeneration.
+- Runs specialists in parallel.
+- Uses a Manager Agent to synthesize one final Markdown answer.
+- Falls back to direct manager research when no relevant skills exist, and suggests creating a reusable skill.
+
+The stream emits `manager_planning_started`, `execution_plan_created`, `skill_selected_by_manager`, `skill_skipped_by_manager`, `no_relevant_skills`, `manager_started`, `specialist_started`, `tool_called`, `tool_output`, `specialist_completed`, `image_generated`, `text_delta`, `manager_completed`, `error`, and `done`.
+
+Skill drafts can be generated without saving:
+
+```sh
+curl http://localhost:8000/api/skills/draft \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Create a skill for dividend sustainability analysis"}'
+```
+
 ## Financial Analysis Workflow
 
-The backend exposes a financial-analysis workflow with code-owned request parsing, MCP data collection, and one `FinancialAnalysisAgent`:
+The frontend routes financial-analysis prompts to a dedicated backend stream. The backend normalizes the submitted stock input, creates one `FinancialAnalysisAgent` with MCP twstock tools and WebSearch, and lets the OpenAI Agents SDK tool-calling loop decide which tools to call:
 
 ```sh
 curl -N http://localhost:8000/api/financial-analysis/stream \
@@ -95,11 +129,12 @@ curl -N http://localhost:8000/api/financial-analysis/stream \
 
 The workflow:
 
-- Normalizes the stock input.
-- Preserves the original question.
-- Infers requested sections in backend code.
-- Collects common structured data through MCP tools.
-- Streams one analyst agent response.
+- Frontend infers whether the prompt is a financial workflow.
+- Frontend extracts a stock input from the prompt or recent chat history.
+- Backend normalizes the submitted stock input.
+- Backend preserves the original question and optional recent chat context.
+- One analyst agent decides which MCP and WebSearch tools to call.
+- Backend streams the analyst agent response.
 - Runs `FinancialVisualizationAgent` with `ImageGenerationTool` when the user asks for a chart/image from numerical data already shown in recent chat history.
 
 The stream emits `agent_started`, `agent_completed`, `reasoning_event`, `tool_called`, `tool_output`, `text_delta`, `image_generated`, `error`, and `done`.
