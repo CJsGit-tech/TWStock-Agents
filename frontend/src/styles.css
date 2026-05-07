@@ -167,6 +167,44 @@ h1 {
   transition: border-color var(--transition-fast), color var(--transition-fast), background var(--transition-fast);
 }
 
+.language-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  font-size: 0.8rem;
+  font-weight: 600;
+  transition: border-color var(--transition-fast), color var(--transition-fast), background var(--transition-fast);
+}
+
+.language-switcher:hover,
+.language-switcher:focus-within {
+  border-color: rgba(52, 211, 153, 0.35);
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.language-switcher select {
+  max-width: 116px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  outline: none;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.language-switcher option {
+  color: var(--text-primary);
+  background: var(--bg-surface);
+}
+
 .guide-button:hover {
   border-color: rgba(52, 211, 153, 0.35);
   color: var(--accent);
@@ -209,7 +247,7 @@ h1 {
 .message-list {
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 24px;
+  padding: 24px 24px 18px;
   min-height: 0;
   scroll-behavior: smooth;
 }
@@ -339,14 +377,18 @@ h1 {
 
 .starter-area {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
-  max-height: 220px;
+  max-height: 82px;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 0 16px 14px;
+  padding: 8px 16px 10px;
   border-top: 1px solid var(--border-subtle);
   background: var(--bg-surface);
+}
+
+.starter-area.with-tutorial {
+  max-height: 180px;
 }
 
 .skill-workbench {
@@ -492,13 +534,6 @@ h1 {
   opacity: 0.45;
 }
 
-.skill-editor {
-  display: grid;
-  gap: 8px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border-subtle);
-}
-
 .skill-editor input,
 .skill-editor textarea {
   width: 100%;
@@ -513,8 +548,20 @@ h1 {
 
 .skill-editor textarea {
   resize: vertical;
-  min-height: 96px;
+  min-height: 180px;
   line-height: 1.45;
+}
+
+.skill-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.skill-draft-help {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  line-height: 1.4;
 }
 
 .skill-editor-actions {
@@ -537,6 +584,67 @@ h1 {
 .skill-editor-actions button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(5, 8, 13, 0.72);
+  backdrop-filter: blur(10px);
+  animation: fadeIn var(--transition-normal) ease both;
+}
+
+.skill-modal {
+  width: min(620px, 100%);
+  max-height: min(82vh, 760px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 16px;
+  overflow: auto;
+  padding: 18px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(180deg, rgba(52, 211, 153, 0.04), transparent 34%),
+    var(--bg-surface);
+  box-shadow: var(--shadow-lg);
+  animation: modalIn var(--transition-normal) ease both;
+}
+
+.skill-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.skill-modal h2 {
+  margin: 2px 0 0;
+  color: var(--text-primary);
+  font-size: 1.05rem;
+  line-height: 1.25;
+}
+
+.modal-close-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  background: var(--bg-raised);
+  cursor: pointer;
+}
+
+.modal-close-button:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
 }
 
 .side-panel {
@@ -566,8 +674,7 @@ h1 {
   gap: 12px;
   align-items: center;
   min-width: 0;
-  margin-top: 14px;
-  padding: 12px;
+  padding: 10px 12px;
   border: 1px solid rgba(52, 211, 153, 0.22);
   border-radius: var(--radius-sm);
   background: rgba(52, 211, 153, 0.05);
@@ -632,7 +739,7 @@ h1 {
   align-items: center;
   justify-content: space-between;
   min-width: 0;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .section-kicker {
@@ -645,19 +752,35 @@ h1 {
 }
 
 .starter-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 8px;
+  display: flex;
+  gap: 6px;
   min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+}
+
+.starter-grid::-webkit-scrollbar {
+  height: 4px;
+}
+
+.starter-grid::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.starter-grid::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: 999px;
 }
 
 .starter-grid button {
   display: grid;
-  grid-template-rows: auto auto auto auto;
-  gap: 5px;
+  grid-template-rows: auto auto;
+  gap: 2px;
+  flex: 0 0 188px;
   min-width: 0;
   min-height: 0;
-  padding: 10px 12px;
+  padding: 8px 10px;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
@@ -708,28 +831,7 @@ h1 {
 
 .starter-grid strong {
   color: var(--text-primary);
-  font-size: 0.84rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.starter-grid small {
-  color: var(--text-secondary);
-  font-size: 0.76rem;
-  line-height: 1.35;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.starter-grid em {
-  display: block;
-  margin-top: 4px;
-  color: var(--text-muted);
-  font-size: 0.72rem;
-  font-style: normal;
-  line-height: 1.35;
+  font-size: 0.8rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -826,11 +928,11 @@ h1 {
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin: 16px;
-  padding: 12px;
+  gap: 6px;
+  margin: 12px 16px 16px;
+  padding: 10px;
   border: 1px solid var(--border-default);
-  border-radius: 20px;
+  border-radius: 16px;
   background:
     linear-gradient(180deg, rgba(52, 211, 153, 0.035), transparent 42%),
     var(--bg-raised);
@@ -841,13 +943,13 @@ h1 {
   width: 100%;
   resize: none;
   border: 0;
-  min-height: 46px;
+  min-height: 28px;
   max-height: 144px;
-  padding: 2px 0 0;
+  padding: 0;
   color: var(--text-primary);
   background: transparent;
   outline: none;
-  font-size: 0.95rem;
+  font-size: 0.9rem;
   line-height: 1.5;
 }
 
@@ -939,7 +1041,7 @@ h1 {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 36px;
+  min-height: 30px;
 }
 
 .composer-tools,
@@ -963,8 +1065,8 @@ h1 {
 }
 
 .composer-icon-button {
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   color: rgba(245, 247, 250, 0.58);
   background: transparent;
 }
@@ -972,6 +1074,12 @@ h1 {
 .composer-icon-button:hover {
   color: var(--text-primary);
   background: rgba(255, 255, 255, 0.08);
+}
+
+.composer-icon-button.listening {
+  color: var(--accent);
+  background: var(--accent-dim);
+  box-shadow: 0 0 0 3px var(--accent-dim);
 }
 
 .compass-button svg {
@@ -1007,8 +1115,8 @@ h1 {
 }
 
 .composer-send-button {
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   color: var(--bg-base);
   background: var(--accent);
 }
@@ -1037,6 +1145,13 @@ h1 {
   overflow: hidden;
   clip: rect(0, 0, 0, 0);
   border: 0;
+}
+
+.composer-notice {
+  margin: -2px 0 0;
+  color: var(--text-secondary);
+  font-size: 0.74rem;
+  line-height: 1.35;
 }
 
 /* ── Event Panel ───────────────────────────────────────── */
@@ -1303,6 +1418,26 @@ h1 {
   }
 }
 
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes modalIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 /* ── Responsive ────────────────────────────────────────── */
 
 @media (max-width: 980px) {
@@ -1357,8 +1492,12 @@ h1 {
   }
 
   .starter-area {
+    max-height: 92px;
+    overflow-y: auto;
+  }
+
+  .starter-area.with-tutorial {
     max-height: none;
-    overflow: visible;
   }
 
   .skill-list {
@@ -1392,7 +1531,7 @@ h1 {
 
   .composer-icon-button,
   .composer-send-button {
-    min-height: 34px;
+    min-height: 30px;
   }
 }
 
@@ -1417,7 +1556,7 @@ h1 {
   }
 
   .starter-area {
-    padding: 0 12px 12px;
+    padding: 8px 12px 10px;
   }
 
   .tutorial-panel {
@@ -1446,9 +1585,160 @@ h1 {
   }
 }
 
+@media (max-width: 640px) {
+  .workspace {
+    padding: 10px;
+  }
+
+  .topbar {
+    gap: 8px;
+    padding-bottom: 10px;
+  }
+
+  .eyebrow {
+    font-size: 0.66rem;
+  }
+
+  .topbar-actions {
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+
+  .language-switcher,
+  .guide-button,
+  .status-pill {
+    height: 32px;
+    flex: 0 0 auto;
+    font-size: 0.75rem;
+  }
+
+  .language-switcher {
+    padding: 0 8px;
+  }
+
+  .language-switcher select {
+    max-width: 86px;
+  }
+
+  .main-grid,
+  .side-panel {
+    gap: 12px;
+  }
+
+  .chat-panel,
+  .skill-workbench,
+  .event-panel {
+    border-radius: 10px;
+  }
+
+  .message-list {
+    max-height: min(48vh, 420px);
+    padding: 12px;
+  }
+
+  .message {
+    max-width: 100%;
+    margin-bottom: 10px;
+    padding: 10px 12px;
+  }
+
+  .starter-area {
+    max-height: 78px;
+    padding: 7px 10px 9px;
+  }
+
+  .starter-area.with-tutorial {
+    max-height: none;
+  }
+
+  .starter-grid button {
+    flex-basis: 154px;
+    padding: 7px 9px;
+  }
+
+  .starter-grid strong {
+    font-size: 0.76rem;
+  }
+
+  .composer {
+    margin: 10px;
+    padding: 9px;
+    border-radius: 14px;
+  }
+
+  .composer-toolbar {
+    align-items: center;
+    gap: 8px;
+  }
+
+  .composer-tools,
+  .composer-actions {
+    gap: 6px;
+  }
+
+  .composer-mode-pill {
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .skill-workbench,
+  .event-panel {
+    padding: 10px;
+  }
+
+  .skill-header {
+    align-items: flex-start;
+  }
+
+  .skill-header strong {
+    font-size: 0.78rem;
+  }
+
+  .skill-row {
+    padding: 8px;
+  }
+
+  .skill-actions button,
+  .skill-header button,
+  .skill-editor-actions button {
+    min-height: 30px;
+    font-size: 0.72rem;
+  }
+
+  .event-panel {
+    max-height: 360px;
+  }
+
+  .modal-backdrop {
+    align-items: end;
+    padding: 10px;
+  }
+
+  .skill-modal {
+    width: 100%;
+    max-height: 88vh;
+    padding: 14px;
+    border-radius: 14px;
+  }
+
+  .skill-modal h2 {
+    font-size: 0.98rem;
+  }
+
+  .skill-editor textarea {
+    min-height: 150px;
+  }
+}
+
 @media (max-width: 480px) {
   .workspace {
-    padding: 8px 12px;
+    padding: 8px;
+  }
+
+  .topbar-actions {
+    justify-content: flex-start;
   }
 
   .message {
@@ -1456,11 +1746,7 @@ h1 {
   }
 
   .starter-area {
-    padding: 0 12px 12px;
-  }
-
-  .starter-grid {
-    grid-template-columns: 1fr;
+    padding: 8px 12px 10px;
   }
 
   .composer-toolbar {
@@ -1472,7 +1758,7 @@ h1 {
   }
 
   .composer-mode-pill {
-    max-width: 180px;
+    max-width: 120px;
     overflow: hidden;
     text-overflow: ellipsis;
   }

@@ -6,6 +6,7 @@ import {
   ChevronDown,
   CircleHelp,
   Compass,
+  Languages,
   Loader2,
   Mic,
   Send,
@@ -14,8 +15,35 @@ import {
   TerminalSquare,
   WandSparkles,
   Wrench,
+  X,
 } from "lucide-react";
 import "./styles.css";
+
+interface SpeechRecognitionEvent extends Event {
+  results: SpeechRecognitionResultList;
+}
+
+interface SpeechRecognitionErrorEvent extends Event {
+  error: string;
+}
+
+interface SpeechRecognition extends EventTarget {
+  lang: string;
+  interimResults: boolean;
+  maxAlternatives: number;
+  start: () => void;
+  stop: () => void;
+  onresult: ((event: SpeechRecognitionEvent) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
+  onend: (() => void) | null;
+}
+
+declare global {
+  interface Window {
+    SpeechRecognition?: new () => SpeechRecognition;
+    webkitSpeechRecognition?: new () => SpeechRecognition;
+  }
+}
 
 type Role = "user" | "assistant";
 
@@ -70,6 +98,8 @@ interface GuidedExample {
 }
 
 type Workflow = "chat" | "financial" | "agentic";
+type Locale = "en" | "zh-TW" | "ja";
+type StatusKey = "ready" | "streaming" | "complete" | "error";
 
 interface ActiveGuide {
   flowId: string;
@@ -85,6 +115,7 @@ interface TutorialStep {
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 const TUTORIAL_STORAGE_KEY = "mcpChatTutorialDismissed";
+const LOCALE_STORAGE_KEY = "mcpChatLocale";
 const MAX_SELECTED_SKILLS = 5;
 const SKILLS_PAGE_SIZE = 4;
 const EMPTY_SKILL_DRAFT: SkillDraft = {
@@ -187,12 +218,226 @@ const TUTORIAL_STEPS: TutorialStep[] = [
   },
 ];
 
+const LANGUAGE_LABELS: Record<Locale, string> = {
+  en: "English",
+  "zh-TW": "繁體中文",
+  ja: "日本語",
+};
+
+const TRANSLATIONS = {
+  en: {
+    eyebrow: "Financial Analyst + FastMCP Tools",
+    title: "Financial Analysis · Arithmetic · Taiwan Stocks",
+    guide: "Guide",
+    ready: "Ready",
+    streaming: "Streaming",
+    complete: "Complete",
+    error: "Error",
+    assistantIntro: "Ask me to run a financial analysis, calculate something, or look up a Taiwan stock.",
+    messageLabel: "Message",
+    placeholder: "Ask for analysis, arithmetic, or a Taiwan stock lookup...",
+    apiKeyTitle: "OpenAI API key",
+    apiKeyConfigured: "A key is configured for this backend session.",
+    apiKeyNeeded: "Required for agent responses, skill drafts, WebSearch, and ImageGeneration.",
+    apiKeyPlaceholder: "sk-...",
+    saveKey: "Save key",
+    apiKeyPasteFirst: "Paste an OpenAI API key first.",
+    apiKeySaved: "API key is set for this backend session.",
+    apiKeyHint: "Open the compass button under the chat input and paste your OpenAI API key.",
+    apiKeyMissing: "OpenAI API key is missing. Use the compass button under the chat input to paste your key, then run the request again.",
+    openApiSettings: "Open API key settings",
+    voiceInput: "Voice input",
+    stopVoiceInput: "Stop voice input",
+    listening: "Listening...",
+    voiceUnavailable: "Voice input is not available in this browser.",
+    sendMessage: "Send message",
+    send: "Send",
+    requiredSkillsCount: (count: number) => count > 0 ? `${count} required skills` : "Manager auto-pick",
+    managerAgent: "Manager agent",
+    requiredSkills: "Required skills",
+    requiredSummary: (count: number) => `${count} required · manager can add more`,
+    newSkill: "New skill",
+    edit: "Edit",
+    delete: "Delete",
+    prev: "Prev",
+    next: "Next",
+    page: (current: number, total: number) => `Page ${current} / ${total}`,
+    skillName: "Skill name",
+    skillDescription: "Short description",
+    skillInstructions: "Specialist instructions",
+    cancel: "Cancel",
+    generateDraft: "Generate draft",
+    saveChanges: "Save changes",
+    createSkill: "Create skill",
+    skillModalTitleNew: "Create skill",
+    skillModalTitleEdit: "Edit skill",
+    skillDraftHelp: "Generate draft calls the backend Skill Prompt Builder agent. It creates an unsaved draft for review.",
+    close: "Close",
+    skillRequired: "Skill name and instructions are required.",
+    skillDraftPrompt: "Describe the skill you want to draft first.",
+    skillLimit: (max: number) => `Select up to ${max} required skills for one run.`,
+    examples: "Examples",
+    nextSuggestedQuestion: "Next suggested question",
+    exampleComplete: "Example complete",
+    moreExamples: "More examples",
+    exampleCompleteBody: "Start another guided example, or continue with your own question in the composer.",
+    back: "Back",
+    done: "Done",
+    eventHistory: "Event History",
+    noEvents: "Reasoning and tool events will appear here.",
+    currentEvent: "Current Event",
+    collapse: "Collapse",
+    expand: "Expand",
+    round: (index: number) => `Round ${index}`,
+    language: "Language",
+  },
+  "zh-TW": {
+    eyebrow: "財務分析 + FastMCP 工具",
+    title: "財務分析 · 算術 · 台灣股票",
+    guide: "導覽",
+    ready: "就緒",
+    streaming: "串流中",
+    complete: "完成",
+    error: "錯誤",
+    assistantIntro: "請我執行財務分析、計算，或查詢台灣股票。",
+    messageLabel: "訊息",
+    placeholder: "輸入分析、計算，或台灣股票查詢...",
+    apiKeyTitle: "OpenAI API 金鑰",
+    apiKeyConfigured: "此後端工作階段已設定金鑰。",
+    apiKeyNeeded: "Agent 回覆、技能草稿、WebSearch 與 ImageGeneration 需要此金鑰。",
+    apiKeyPlaceholder: "sk-...",
+    saveKey: "儲存金鑰",
+    apiKeyPasteFirst: "請先貼上 OpenAI API 金鑰。",
+    apiKeySaved: "API 金鑰已設定到此後端工作階段。",
+    apiKeyHint: "點擊聊天輸入框下方的指南針按鈕並貼上 OpenAI API 金鑰。",
+    apiKeyMissing: "缺少 OpenAI API 金鑰。請使用聊天輸入框下方的指南針按鈕貼上金鑰，然後重新送出請求。",
+    openApiSettings: "開啟 API 金鑰設定",
+    voiceInput: "語音輸入",
+    stopVoiceInput: "停止語音輸入",
+    listening: "正在聆聽...",
+    voiceUnavailable: "此瀏覽器不支援語音輸入。",
+    sendMessage: "送出訊息",
+    send: "送出",
+    requiredSkillsCount: (count: number) => count > 0 ? `${count} 個必用技能` : "Manager 自動挑選",
+    managerAgent: "Manager Agent",
+    requiredSkills: "必用技能",
+    requiredSummary: (count: number) => `${count} 個必用 · manager 可再加入`,
+    newSkill: "新技能",
+    edit: "編輯",
+    delete: "刪除",
+    prev: "上一頁",
+    next: "下一頁",
+    page: (current: number, total: number) => `第 ${current} / ${total} 頁`,
+    skillName: "技能名稱",
+    skillDescription: "簡短描述",
+    skillInstructions: "Specialist 指令",
+    cancel: "取消",
+    generateDraft: "產生草稿",
+    saveChanges: "儲存變更",
+    createSkill: "建立技能",
+    skillModalTitleNew: "建立技能",
+    skillModalTitleEdit: "編輯技能",
+    skillDraftHelp: "產生草稿會呼叫後端 Skill Prompt Builder agent，建立未儲存的草稿供你審閱。",
+    close: "關閉",
+    skillRequired: "技能名稱與指令為必填。",
+    skillDraftPrompt: "請先描述你想產生的技能。",
+    skillLimit: (max: number) => `每次最多選擇 ${max} 個必用技能。`,
+    examples: "範例",
+    nextSuggestedQuestion: "下一個建議問題",
+    exampleComplete: "範例完成",
+    moreExamples: "更多範例",
+    exampleCompleteBody: "開始另一個導覽範例，或直接在輸入框繼續提問。",
+    back: "返回",
+    done: "完成",
+    eventHistory: "事件紀錄",
+    noEvents: "推理與工具事件會顯示在這裡。",
+    currentEvent: "目前事件",
+    collapse: "收合",
+    expand: "展開",
+    round: (index: number) => `第 ${index} 回合`,
+    language: "語言",
+  },
+  ja: {
+    eyebrow: "財務分析 + FastMCP ツール",
+    title: "財務分析 · 計算 · 台湾株",
+    guide: "ガイド",
+    ready: "待機中",
+    streaming: "出力中",
+    complete: "完了",
+    error: "エラー",
+    assistantIntro: "財務分析、計算、台湾株の検索を依頼してください。",
+    messageLabel: "メッセージ",
+    placeholder: "分析、計算、台湾株検索を入力...",
+    apiKeyTitle: "OpenAI API キー",
+    apiKeyConfigured: "このバックエンドセッションにキーが設定されています。",
+    apiKeyNeeded: "Agent 応答、スキル下書き、WebSearch、ImageGeneration に必要です。",
+    apiKeyPlaceholder: "sk-...",
+    saveKey: "キーを保存",
+    apiKeyPasteFirst: "OpenAI API キーを貼り付けてください。",
+    apiKeySaved: "API キーをこのバックエンドセッションに設定しました。",
+    apiKeyHint: "チャット入力欄の下にあるコンパスボタンを開き、OpenAI API キーを貼り付けてください。",
+    apiKeyMissing: "OpenAI API キーが未設定です。チャット入力欄の下のコンパスボタンからキーを貼り付け、もう一度実行してください。",
+    openApiSettings: "API キー設定を開く",
+    voiceInput: "音声入力",
+    stopVoiceInput: "音声入力を停止",
+    listening: "聞き取り中...",
+    voiceUnavailable: "このブラウザーでは音声入力を利用できません。",
+    sendMessage: "送信",
+    send: "送信",
+    requiredSkillsCount: (count: number) => count > 0 ? `${count} 個の必須スキル` : "Manager が自動選択",
+    managerAgent: "Manager agent",
+    requiredSkills: "必須スキル",
+    requiredSummary: (count: number) => `${count} 必須 · manager が追加可能`,
+    newSkill: "新規スキル",
+    edit: "編集",
+    delete: "削除",
+    prev: "前へ",
+    next: "次へ",
+    page: (current: number, total: number) => `${current} / ${total} ページ`,
+    skillName: "スキル名",
+    skillDescription: "短い説明",
+    skillInstructions: "Specialist 指示",
+    cancel: "キャンセル",
+    generateDraft: "下書きを生成",
+    saveChanges: "変更を保存",
+    createSkill: "スキル作成",
+    skillModalTitleNew: "スキル作成",
+    skillModalTitleEdit: "スキル編集",
+    skillDraftHelp: "下書き生成はバックエンドの Skill Prompt Builder agent を呼び出し、保存前の下書きを作成します。",
+    close: "閉じる",
+    skillRequired: "スキル名と指示は必須です。",
+    skillDraftPrompt: "作成したいスキルを先に説明してください。",
+    skillLimit: (max: number) => `1 回に選択できる必須スキルは最大 ${max} 個です。`,
+    examples: "例",
+    nextSuggestedQuestion: "次のおすすめ質問",
+    exampleComplete: "例が完了",
+    moreExamples: "他の例",
+    exampleCompleteBody: "別のガイド例を開始するか、入力欄から続けて質問してください。",
+    back: "戻る",
+    done: "完了",
+    eventHistory: "イベント履歴",
+    noEvents: "推論とツールイベントがここに表示されます。",
+    currentEvent: "現在のイベント",
+    collapse: "折りたたむ",
+    expand: "展開",
+    round: (index: number) => `ラウンド ${index}`,
+    language: "言語",
+  },
+} satisfies Record<Locale, Record<string, string | ((...args: never[]) => string)>>;
+
+function initialLocale(): Locale {
+  const stored = localStorage.getItem(LOCALE_STORAGE_KEY);
+  return stored === "zh-TW" || stored === "ja" || stored === "en" ? stored : "en";
+}
+
 function App() {
+  const [locale, setLocale] = useState<Locale>(initialLocale);
+  const t = TRANSLATIONS[locale] as typeof TRANSLATIONS.en;
   const [messages, setMessages] = useState<Message[]>([
     {
       id: crypto.randomUUID(),
       role: "assistant",
-      content: "Ask me to run a financial analysis, calculate something, or look up a Taiwan stock.",
+      content: TRANSLATIONS[initialLocale()].assistantIntro,
     },
   ]);
   const [input, setInput] = useState("");
@@ -200,10 +445,10 @@ function App() {
   const [eventHistory, setEventHistory] = useState<StreamEvent[]>([]);
   const [collapsedRounds, setCollapsedRounds] = useState<Set<string>>(new Set());
   const [tutorialStep, setTutorialStep] = useState(0);
-  const [showTutorial, setShowTutorial] = useState(() => localStorage.getItem(TUTORIAL_STORAGE_KEY) !== "true");
+  const [showTutorial, setShowTutorial] = useState(false);
   const [activeGuide, setActiveGuide] = useState<ActiveGuide | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [status, setStatus] = useState("Ready");
+  const [status, setStatus] = useState<StatusKey>("ready");
   const [skills, setSkills] = useState<Skill[]>([]);
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const [skillDraft, setSkillDraft] = useState<SkillDraft>(EMPTY_SKILL_DRAFT);
@@ -216,6 +461,9 @@ function App() {
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
   const [apiKeyMessage, setApiKeyMessage] = useState("");
+  const [voiceMessage, setVoiceMessage] = useState("");
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const eventOrderRef = useRef(0);
   const streamingRef = useRef(false);
@@ -235,6 +483,18 @@ function App() {
     const maxPage = Math.max(0, Math.ceil(skills.length / SKILLS_PAGE_SIZE) - 1);
     setSkillPage((current) => Math.min(current, maxPage));
   }, [skills.length]);
+
+  function changeLocale(nextLocale: Locale) {
+    localStorage.setItem(LOCALE_STORAGE_KEY, nextLocale);
+    setLocale(nextLocale);
+    setMessages((current) =>
+      current.map((message, index) =>
+        index === 0 && message.role === "assistant"
+          ? { ...message, content: TRANSLATIONS[nextLocale].assistantIntro }
+          : message,
+      ),
+    );
+  }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -308,7 +568,7 @@ function App() {
     setMessages(nextMessages);
     setInput("");
     setIsStreaming(true);
-    setStatus("Streaming");
+    setStatus("streaming");
 
     let completed = false;
     let streamErrored = false;
@@ -327,16 +587,16 @@ function App() {
         streamErrored = processStreamPayload(payload, assistantId) || streamErrored;
       });
       if (streamErrored) {
-        setStatus("Error");
+        setStatus("error");
       } else {
         completed = true;
-        setStatus("Complete");
+        setStatus("complete");
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       appendAssistantText(assistantId, `\n\n${message}`);
       appendEvent(assistantId, "error", "Stream error", message);
-      setStatus("Error");
+      setStatus("error");
     } finally {
       streamingRef.current = false;
       setIsStreaming(false);
@@ -382,7 +642,7 @@ function App() {
   async function saveOpenAIKey() {
     const apiKey = apiKeyInput.trim();
     if (!apiKey) {
-      setApiKeyMessage("Paste an OpenAI API key first.");
+      setApiKeyMessage(t.apiKeyPasteFirst);
       return;
     }
 
@@ -397,7 +657,7 @@ function App() {
       }
       setApiKeyInput("");
       setApiKeyConfigured(true);
-      setApiKeyMessage("API key is set for this backend session.");
+      setApiKeyMessage(t.apiKeySaved);
       setShowApiKeyPanel(false);
     } catch (error) {
       setApiKeyMessage(error instanceof Error ? error.message : String(error));
@@ -408,7 +668,7 @@ function App() {
     const name = skillDraft.name.trim();
     const instructions = skillDraft.instructions.trim();
     if (!name || !instructions) {
-      setSkillError("Skill name and instructions are required.");
+      setSkillError(t.skillRequired);
       return;
     }
 
@@ -460,7 +720,7 @@ function App() {
 
   function toggleSkill(id: string) {
     if (!selectedSkillIds.includes(id) && selectedSkillIds.length >= MAX_SELECTED_SKILLS) {
-      setSkillError(`Select up to ${MAX_SELECTED_SKILLS} skills for one run.`);
+      setSkillError(t.skillLimit(MAX_SELECTED_SKILLS));
       return;
     }
     setSelectedSkillIds((current) => {
@@ -481,7 +741,7 @@ function App() {
   async function draftSkill() {
     const prompt = input.trim() || skillDraft.description.trim() || skillDraft.name.trim();
     if (!prompt) {
-      setSkillError("Describe the skill you want to draft first.");
+      setSkillError(t.skillDraftPrompt);
       return;
     }
 
@@ -508,6 +768,42 @@ function App() {
     } finally {
       setIsDraftingSkill(false);
     }
+  }
+
+  function toggleVoiceInput() {
+    if (isListening) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+      return;
+    }
+
+    const SpeechRecognitionCtor = window.SpeechRecognition ?? window.webkitSpeechRecognition;
+    if (!SpeechRecognitionCtor) {
+      setVoiceMessage(t.voiceUnavailable);
+      return;
+    }
+
+    const recognition = new SpeechRecognitionCtor();
+    recognition.lang = locale === "ja" ? "ja-JP" : locale === "zh-TW" ? "zh-TW" : "en-US";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognition.onresult = (event) => {
+      const transcript = event.results[0]?.[0]?.transcript?.trim();
+      if (transcript) {
+        setInput((current) => `${current}${current ? " " : ""}${transcript}`);
+      }
+    };
+    recognition.onerror = (event) => {
+      setVoiceMessage(event.error ? `Voice input: ${event.error}` : t.voiceUnavailable);
+      setIsListening(false);
+    };
+    recognition.onend = () => {
+      setIsListening(false);
+    };
+    recognitionRef.current = recognition;
+    setVoiceMessage(t.listening);
+    setIsListening(true);
+    recognition.start();
   }
 
   function processStreamPayload(payload: Record<string, unknown>, assistantId: string): boolean {
@@ -630,10 +926,10 @@ function App() {
       if (message.includes("OPENAI_API_KEY")) {
         setShowApiKeyPanel(true);
         setApiKeyConfigured(false);
-        setApiKeyMessage("Open the compass button under the chat input and paste your OpenAI API key.");
+        setApiKeyMessage(t.apiKeyHint);
         appendAssistantText(
           assistantId,
-          "\n\nOpenAI API key is missing. Use the compass button under the chat input to paste your key, then run the request again.",
+          `\n\n${t.apiKeyMissing}`,
         );
       } else {
         appendAssistantText(assistantId, `\n\n${message}`);
@@ -682,24 +978,35 @@ function App() {
   }
 
   return (
+    <>
     <main className="app-shell">
       <section className="workspace">
         <header className="topbar">
           <div>
             <div className="eyebrow">
               <Server size={13} />
-              Financial Analyst + FastMCP Tools
+              {t.eyebrow}
             </div>
-            <h1>Financial Analysis · Arithmetic · Taiwan Stocks</h1>
+            <h1>{t.title}</h1>
           </div>
           <div className="topbar-actions">
+            <label className="language-switcher" aria-label={t.language}>
+              <Languages size={15} />
+              <select value={locale} onChange={(event) => changeLocale(event.target.value as Locale)}>
+                {Object.entries(LANGUAGE_LABELS).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <button className="guide-button" type="button" onClick={showGuide}>
               <CircleHelp size={15} />
-              Guide
+              {t.guide}
             </button>
             <div className="status-pill" data-active={isStreaming}>
               {isStreaming ? <Loader2 className="spin" size={15} /> : <CheckCircle2 size={15} />}
-              {status}
+              {t[status]}
             </div>
           </div>
         </header>
@@ -729,11 +1036,12 @@ function App() {
             </div>
 
             {(showTutorial || shouldShowStarters) && (
-              <section className="starter-area" aria-label="Getting started">
+              <section className={`starter-area ${showTutorial ? "with-tutorial" : ""}`} aria-label="Getting started">
                 {showTutorial && (
                   <TutorialPanel
                     step={tutorialStep}
                     steps={TUTORIAL_STEPS}
+                    t={t}
                     onBack={() => setTutorialStep((current) => Math.max(0, current - 1))}
                     onNext={() =>
                       setTutorialStep((current) => Math.min(TUTORIAL_STEPS.length - 1, current + 1))
@@ -747,6 +1055,7 @@ function App() {
                     examples={GUIDED_EXAMPLES}
                     activeExample={activeExample}
                     activeGuide={activeGuide}
+                    t={t}
                     onStart={startGuidedExample}
                     onContinue={continueGuidedExample}
                     onReset={() => setActiveGuide(null)}
@@ -757,23 +1066,23 @@ function App() {
 
             <form className="composer" onSubmit={handleSubmit}>
               <label className="sr-only" htmlFor="message">
-                Message
+                {t.messageLabel}
               </label>
               <textarea
                 id="message"
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask for analysis, arithmetic, or a Taiwan stock lookup…"
-                rows={2}
+                placeholder={t.placeholder}
+                rows={1}
               />
               <div className={`api-key-panel ${showApiKeyPanel ? "open" : ""}`} aria-hidden={!showApiKeyPanel}>
                 <div>
-                  <strong>OpenAI API key</strong>
+                  <strong>{t.apiKeyTitle}</strong>
                   <small>
                     {apiKeyConfigured
-                      ? "A key is configured for this backend session."
-                      : "Required for agent responses, skill drafts, WebSearch, and ImageGeneration."}
+                      ? t.apiKeyConfigured
+                      : t.apiKeyNeeded}
                   </small>
                 </div>
                 <div className="api-key-controls">
@@ -781,11 +1090,11 @@ function App() {
                     type="password"
                     value={apiKeyInput}
                     onChange={(event) => setApiKeyInput(event.target.value)}
-                    placeholder="sk-..."
+                    placeholder={t.apiKeyPlaceholder}
                     autoComplete="off"
                   />
                   <button type="button" onClick={saveOpenAIKey}>
-                    Save key
+                    {t.saveKey}
                   </button>
                 </div>
                 {apiKeyMessage ? <p>{apiKeyMessage}</p> : null}
@@ -795,7 +1104,7 @@ function App() {
                   <button
                     type="button"
                     className={`composer-icon-button compass-button ${showApiKeyPanel ? "open" : ""}`}
-                    aria-label="Open API key settings"
+                    aria-label={t.openApiSettings}
                     aria-expanded={showApiKeyPanel}
                     onClick={() => setShowApiKeyPanel((current) => !current)}
                   >
@@ -803,26 +1112,33 @@ function App() {
                   </button>
                   <span className="composer-mode-pill">
                     <ShieldCheck size={14} />
-                    {selectedSkillIds.length > 0 ? `${selectedSkillIds.length} required skills` : "Manager auto-pick"}
+                    {t.requiredSkillsCount(selectedSkillIds.length)}
                     <ChevronDown size={14} />
                   </span>
                 </div>
                 <div className="composer-actions">
-                  <span className="composer-model-pill">Manager agent</span>
-                  <button type="button" className="composer-icon-button" aria-label="Voice input">
+                  <span className="composer-model-pill">{t.managerAgent}</span>
+                  <button
+                    type="button"
+                    className={`composer-icon-button ${isListening ? "listening" : ""}`}
+                    aria-label={isListening ? t.stopVoiceInput : t.voiceInput}
+                    title={isListening ? t.stopVoiceInput : t.voiceInput}
+                    onClick={toggleVoiceInput}
+                  >
                     <Mic size={16} />
                   </button>
                   <button
                     type="submit"
                     className="composer-send-button"
                     disabled={isStreaming || !input.trim()}
-                    aria-label="Send message"
+                    aria-label={t.sendMessage}
                   >
                     <Send size={17} />
-                    <span>Send</span>
+                    <span>{t.send}</span>
                   </button>
                 </div>
               </div>
+              {voiceMessage ? <p className="composer-notice">{voiceMessage}</p> : null}
             </form>
           </section>
 
@@ -830,36 +1146,26 @@ function App() {
             <SkillWorkbench
               skills={skills}
               selectedSkillIds={selectedSkillIds}
-              skillDraft={skillDraft}
               editingSkillId={editingSkillId}
-              showEditor={showSkillEditor}
               error={skillError}
               page={skillPage}
-              isDrafting={isDraftingSkill}
               onToggleSkill={toggleSkill}
               onEditSkill={editSkill}
               onDeleteSkill={deleteSkill}
               onNewSkill={newSkill}
-              onDraftSkill={draftSkill}
               onPageChange={setSkillPage}
-              onCancelEdit={() => {
-                setShowSkillEditor(false);
-                setEditingSkillId(null);
-                setSkillDraft(EMPTY_SKILL_DRAFT);
-              }}
-              onDraftChange={setSkillDraft}
-              onSaveSkill={saveSkill}
+              t={t}
             />
 
-            <section className="event-panel" aria-label="Reasoning and tool event history">
+            <section className="event-panel" aria-label={t.eventHistory}>
               <section className="history-section">
                 <div className="panel-title">
                   <Brain size={15} />
-                  Event History
+                  {t.eventHistory}
                 </div>
                 <div className="event-list">
                   {allEvents(currentEvent, eventHistory).length === 0 ? (
-                    <p className="empty-event">Reasoning and tool events will appear here.</p>
+                    <p className="empty-event">{t.noEvents}</p>
                   ) : (
                     groupedEvents(allEvents(currentEvent, eventHistory), messages).map((group) => (
                       <RoundEventGroup
@@ -878,6 +1184,23 @@ function App() {
         </div>
       </section>
     </main>
+    {showSkillEditor ? (
+      <SkillEditorModal
+        skillDraft={skillDraft}
+        editingSkillId={editingSkillId}
+        isDrafting={isDraftingSkill}
+        onDraftSkill={draftSkill}
+        onCancelEdit={() => {
+          setShowSkillEditor(false);
+          setEditingSkillId(null);
+          setSkillDraft(EMPTY_SKILL_DRAFT);
+        }}
+        onDraftChange={setSkillDraft}
+        onSaveSkill={saveSkill}
+        t={t}
+      />
+    ) : null}
+    </>
   );
 
   function toggleRound(messageId: string) {
@@ -896,39 +1219,27 @@ function App() {
 function SkillWorkbench({
   skills,
   selectedSkillIds,
-  skillDraft,
   editingSkillId,
-  showEditor,
   error,
   page,
-  isDrafting,
   onToggleSkill,
   onEditSkill,
   onDeleteSkill,
   onNewSkill,
-  onDraftSkill,
   onPageChange,
-  onCancelEdit,
-  onDraftChange,
-  onSaveSkill,
+  t,
 }: {
   skills: Skill[];
   selectedSkillIds: string[];
-  skillDraft: SkillDraft;
   editingSkillId: string | null;
-  showEditor: boolean;
   error: string;
   page: number;
-  isDrafting: boolean;
   onToggleSkill: (id: string) => void;
   onEditSkill: (skill: Skill) => void;
   onDeleteSkill: (id: string) => void;
   onNewSkill: () => void;
-  onDraftSkill: () => void;
   onPageChange: (page: number) => void;
-  onCancelEdit: () => void;
-  onDraftChange: (draft: SkillDraft) => void;
-  onSaveSkill: () => void;
+  t: typeof TRANSLATIONS.en;
 }) {
   const pageCount = Math.max(1, Math.ceil(skills.length / SKILLS_PAGE_SIZE));
   const safePage = Math.min(page, pageCount - 1);
@@ -938,11 +1249,11 @@ function SkillWorkbench({
     <section className="skill-workbench" aria-label="Agentic skills">
       <div className="skill-header">
         <div>
-          <span className="section-kicker">Required skills</span>
-          <strong>{selectedSkillIds.length} required · manager can add more</strong>
+          <span className="section-kicker">{t.requiredSkills}</span>
+          <strong>{t.requiredSummary(selectedSkillIds.length)}</strong>
         </div>
         <button type="button" onClick={onNewSkill}>
-          New skill
+          {t.newSkill}
         </button>
       </div>
 
@@ -968,10 +1279,10 @@ function SkillWorkbench({
               </label>
               <div className="skill-actions">
                 <button type="button" onClick={() => onEditSkill(skill)}>
-                  Edit
+                  {t.edit}
                 </button>
                 <button type="button" onClick={() => onDeleteSkill(skill.id)}>
-                  Delete
+                  {t.delete}
                 </button>
               </div>
             </article>
@@ -981,54 +1292,95 @@ function SkillWorkbench({
 
       <div className="skill-pagination" aria-label="Skill pagination">
         <button type="button" onClick={() => onPageChange(Math.max(0, safePage - 1))} disabled={safePage === 0}>
-          Prev
+          {t.prev}
         </button>
         <span>
-          Page {safePage + 1} / {pageCount}
+          {t.page(safePage + 1, pageCount)}
         </span>
         <button
           type="button"
           onClick={() => onPageChange(Math.min(pageCount - 1, safePage + 1))}
           disabled={safePage >= pageCount - 1}
         >
-          Next
+          {t.next}
         </button>
       </div>
+    </section>
+  );
+}
 
+function SkillEditorModal({
+  skillDraft,
+  editingSkillId,
+  isDrafting,
+  onDraftSkill,
+  onCancelEdit,
+  onDraftChange,
+  onSaveSkill,
+  t,
+}: {
+  skillDraft: SkillDraft;
+  editingSkillId: string | null;
+  isDrafting: boolean;
+  onDraftSkill: () => void;
+  onCancelEdit: () => void;
+  onDraftChange: (draft: SkillDraft) => void;
+  onSaveSkill: () => void;
+  t: typeof TRANSLATIONS.en;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onCancelEdit}>
+      <section
+        className="skill-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="skill-modal-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="skill-modal-header">
+          <div>
+            <span className="section-kicker">{t.requiredSkills}</span>
+            <h2 id="skill-modal-title">{editingSkillId ? t.skillModalTitleEdit : t.skillModalTitleNew}</h2>
+          </div>
+          <button type="button" className="modal-close-button" onClick={onCancelEdit} aria-label={t.close}>
+            <X size={18} />
+          </button>
+        </div>
 
-      {showEditor ? (
         <div className="skill-editor">
           <input
             value={skillDraft.name}
             onChange={(event) => onDraftChange({ ...skillDraft, name: event.target.value })}
-            placeholder="Skill name"
+            placeholder={t.skillName}
+            autoFocus
           />
           <input
             value={skillDraft.description}
             onChange={(event) => onDraftChange({ ...skillDraft, description: event.target.value })}
-            placeholder="Short description"
+            placeholder={t.skillDescription}
           />
           <textarea
             value={skillDraft.instructions}
             onChange={(event) => onDraftChange({ ...skillDraft, instructions: event.target.value })}
-            placeholder="Specialist instructions"
-            rows={5}
+            placeholder={t.skillInstructions}
+            rows={8}
           />
+          <p className="skill-draft-help">{t.skillDraftHelp}</p>
           <div className="skill-editor-actions">
             <button type="button" onClick={onCancelEdit}>
-              Cancel
+              {t.cancel}
             </button>
             <button type="button" onClick={onDraftSkill} disabled={isDrafting}>
               {isDrafting ? <Loader2 className="spin" size={14} /> : <WandSparkles size={14} />}
-              Generate draft
+              {t.generateDraft}
             </button>
             <button type="button" onClick={onSaveSkill}>
-              {editingSkillId ? "Save changes" : "Create skill"}
+              {editingSkillId ? t.saveChanges : t.createSkill}
             </button>
           </div>
         </div>
-      ) : null}
-    </section>
+      </section>
+    </div>
   );
 }
 
@@ -1038,12 +1390,14 @@ function TutorialPanel({
   onBack,
   onNext,
   onDone,
+  t,
 }: {
   step: number;
   steps: TutorialStep[];
   onBack: () => void;
   onNext: () => void;
   onDone: () => void;
+  t: typeof TRANSLATIONS.en;
 }) {
   const current = steps[step];
   const isLast = step === steps.length - 1;
@@ -1057,15 +1411,15 @@ function TutorialPanel({
       </div>
       <div className="tutorial-controls">
         <button type="button" onClick={onBack} disabled={step === 0}>
-          Back
+          {t.back}
         </button>
         {isLast ? (
           <button type="button" onClick={onDone}>
-            Done
+            {t.done}
           </button>
         ) : (
           <button type="button" onClick={onNext}>
-            Next
+            {t.next}
           </button>
         )}
       </div>
@@ -1080,6 +1434,7 @@ function GuidedStarter({
   onStart,
   onContinue,
   onReset,
+  t,
 }: {
   examples: GuidedExample[];
   activeExample: GuidedExample | null | undefined;
@@ -1087,13 +1442,14 @@ function GuidedStarter({
   onStart: (example: GuidedExample) => void;
   onContinue: () => void;
   onReset: () => void;
+  t: typeof TRANSLATIONS.en;
 }) {
   if (activeExample && activeGuide?.status === "ready-next") {
     const nextPrompt = activeExample.prompts[activeGuide.stepIndex];
     return (
       <section className="starter-prompts" aria-label="Next guided question">
         <div className="starter-header">
-          <span className="section-kicker">Next suggested question</span>
+          <span className="section-kicker">{t.nextSuggestedQuestion}</span>
         </div>
         <button className="next-guide-card" type="button" onClick={onContinue}>
           <span>{nextPrompt.category}</span>
@@ -1109,12 +1465,12 @@ function GuidedStarter({
       <section className="starter-prompts" aria-label="Completed guided example">
         <div className="guide-complete">
           <div>
-            <span className="section-kicker">Example complete</span>
+            <span className="section-kicker">{t.exampleComplete}</span>
             <strong>{activeExample.title}</strong>
-            <p>Start another guided example, or continue with your own question in the composer.</p>
+            <p>{t.exampleCompleteBody}</p>
           </div>
           <button type="button" onClick={onReset}>
-            More examples
+            {t.moreExamples}
           </button>
         </div>
       </section>
@@ -1124,7 +1480,7 @@ function GuidedStarter({
   return (
     <section className="starter-prompts" aria-label="Guided starter examples">
       <div className="starter-header">
-        <span className="section-kicker">Choose a guided example</span>
+        <span className="section-kicker">{t.examples}</span>
       </div>
       <div className="starter-grid">
         {examples.map((example) => (
@@ -1139,8 +1495,6 @@ function GuidedStarter({
               <CircleHelp size={13} aria-hidden="true" />
             </span>
             <strong>{example.title}</strong>
-            <small title={example.summary}>{example.summary}</small>
-            <em title={example.prompts[0].prompt}>{example.prompts[0].prompt}</em>
           </button>
         ))}
       </div>
