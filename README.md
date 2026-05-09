@@ -45,8 +45,8 @@ OPENAI_API_KEY="..."
 OPENAI_MODEL="gpt-5-mini"
 FINANCIAL_ANALYSIS_MODEL="gpt-5-mini"
 FINANCIAL_ANALYSIS_WEB_CONTEXT="medium"
-OPENAI_IMAGE_MODEL="gpt-image-1"
-OPENAI_IMAGE_QUALITY="low"
+OPENAI_IMAGE_MODEL="gpt-image-2"
+OPENAI_IMAGE_QUALITY="medium"
 DATABASE_URL="postgresql+psycopg://twstock:twstock@postgres:5432/twstock_agents"
 ```
 
@@ -107,7 +107,7 @@ The workflow:
 - Uses a Manager Agent to synthesize one final Markdown answer.
 - Falls back to direct manager research when no relevant skills exist, and suggests creating a reusable skill.
 
-The stream emits `manager_planning_started`, `execution_plan_created`, `skill_selected_by_manager`, `skill_skipped_by_manager`, `no_relevant_skills`, `manager_started`, `specialist_started`, `tool_called`, `tool_output`, `specialist_completed`, `image_generated`, `text_delta`, `manager_completed`, `error`, and `done`.
+The stream emits `trace_started`, `manager_planning_started`, `execution_plan_created`, `skill_selected_by_manager`, `skill_skipped_by_manager`, `no_relevant_skills`, `manager_started`, `specialist_started`, `tool_called`, `tool_output`, `specialist_completed`, `image_generation_started`, `image_generated`, `text_delta`, `manager_completed`, `trace_completed`, `error`, and `done`.
 
 Skill drafts can be generated without saving:
 
@@ -137,7 +137,7 @@ The workflow:
 - Backend streams the analyst agent response.
 - Runs `FinancialVisualizationAgent` with `ImageGenerationTool` when the user asks for a chart/image from numerical data already shown in recent chat history.
 
-The stream emits `agent_started`, `agent_completed`, `reasoning_event`, `tool_called`, `tool_output`, `text_delta`, `image_generated`, `error`, and `done`.
+The stream emits `trace_started`, `agent_started`, `agent_completed`, `reasoning_event`, `tool_called`, `tool_output`, `text_delta`, `image_generation_started`, `image_generated`, `trace_completed`, `error`, and `done`.
 
 ## Run The MCP Server Directly
 

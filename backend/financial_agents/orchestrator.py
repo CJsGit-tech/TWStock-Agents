@@ -19,11 +19,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import uuid
 from collections.abc import AsyncIterator
-from dataclasses import asdict, is_dataclass
+from dataclasses import fields, is_dataclass
 from typing import Any
 
-from agents import Runner
+from agents import Runner, agent_span
 from agents.items import ToolCallItem, ToolCallOutputItem
 from agents.mcp import MCPServer
 from openai.types.responses import (
@@ -34,6 +35,7 @@ from openai.types.responses import (
 
 from .agents import financial_analysis_agent, financial_visualization_agent
 from .schemas import SpecialistResult, normalize_stock_input
+from agent_tracing import run_config, trace_url, tracing_disabled
 
 # ---------------------------------------------------------------------------
 # Visualization detection
@@ -58,6 +60,8 @@ async def run_financial_analysis(
     mcp_servers: list[MCPServer],
     question: str | None = None,
     context: str | None = None,
+    trace_id: str | None = None,
+    trace_metadata: dict[str, Any] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Run the financial analysis and yield NDJSON-compatible events."""
 
@@ -66,7 +70,13 @@ async def run_financial_analysis(
 
     # Decide whether this is a visualization request or an analysis request
     if _is_visualization_request(effective_question):
-        async for event in _run_visualization(normalized_stock, effective_question, context):
+        async for event in _run_visualization(
+            normalized_stock,
+            effective_question,
+            context,
+            trace_id=trace_id,
+            trace_metadata=trace_metadata,
+        ):
             yield event
         return
 
@@ -84,10 +94,26 @@ async def run_financial_analysis(
     if context:
         prompt += f"\n\n先前對話摘要：\n{context[-3000:]}"
 
-    result = Runner.run_streamed(agent, input=prompt, max_turns=20)
-    async for event in result.stream_events():
-        async for normalized in _normalize_agent_event(event):
-            yield normalized
+    metadata = {
+        **(trace_metadata or {}),
+        "agent": "FinancialAnalysisAgent",
+        "stock": normalized_stock,
+        "workflow": "Financial analysis",
+    }
+    with agent_span(
+        "FinancialAnalysisAgent",
+        tools=["twstock MCP", "arithmetic MCP", "WebSearch"],
+        disabled=tracing_disabled(),
+    ):
+        result = Runner.run_streamed(
+            agent,
+            input=prompt,
+            max_turns=20,
+            run_config=run_config("Financial analysis", trace_id=trace_id, group_id=normalized_stock, metadata=metadata),
+        )
+        async for event in result.stream_events():
+            async for normalized in _normalize_agent_event(event):
+                yield normalized
 
     yield {
         "type": "agent_completed",
@@ -110,6 +136,8 @@ async def _run_visualization(
     stock: str,
     question: str,
     context: str | None,
+    trace_id: str | None = None,
+    trace_metadata: dict[str, Any] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Run the visualization agent with chat context as data source."""
 
@@ -139,22 +167,65 @@ async def _run_visualization(
         f"使用者要求：{question}\n\n"
         f"以下是對話中已有的數據，用這些數據生成圖表：\n{chart_data}"
     )
+    image_id = f"image-{uuid.uuid4()}"
+    yield {
+        "type": "image_generation_started",
+        "payload": {
+            "id": image_id,
+            "agent": "FinancialVisualizationAgent",
+            "title": f"{stock} financial visualization",
+            "description": "Generating financial visualization.",
+            "trace_id": trace_id,
+            "trace_url": trace_url(trace_id) if trace_id else None,
+            "model": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2"),
+            "size": os.getenv("OPENAI_IMAGE_SIZE", "1024x1024"),
+            "quality": os.getenv("OPENAI_IMAGE_QUALITY", "medium"),
+        },
+    }
 
     try:
-        vis_result = await Runner.run(financial_visualization_agent(), prompt, max_turns=6)
-        image = _extract_image_payload(vis_result)
+        metadata = {
+            **(trace_metadata or {}),
+            "agent": "FinancialVisualizationAgent",
+            "stock": stock,
+            "workflow": "Financial visualization",
+        }
+        with agent_span(
+            "FinancialVisualizationAgent",
+            tools=["ImageGenerationTool"],
+            disabled=tracing_disabled(),
+        ):
+            vis_result = await Runner.run(
+                financial_visualization_agent(),
+                prompt,
+                max_turns=6,
+                run_config=run_config(
+                    "Financial visualization",
+                    trace_id=trace_id,
+                    group_id=stock,
+                    metadata=metadata,
+                ),
+            )
+        images = _extract_image_payloads(vis_result)
         description = _stringify_output(vis_result.final_output)[:500]
 
-        if image:
-            yield {
-                "type": "image_generated",
-                "payload": {
-                    "agent": "FinancialVisualizationAgent",
-                    "title": f"{stock} financial visualization",
-                    "description": description,
-                    "image": image,
-                },
-            }
+        if images:
+            for index, image in enumerate(images):
+                yield {
+                    "type": "image_generated",
+                    "payload": {
+                        "id": image_id if index == 0 else f"image-{uuid.uuid4()}",
+                        "agent": "FinancialVisualizationAgent",
+                        "title": f"{stock} financial visualization" if len(images) == 1 else f"{stock} financial visualization {index + 1}",
+                        "description": description,
+                        "image": image,
+                        "trace_id": trace_id,
+                        "trace_url": trace_url(trace_id) if trace_id else None,
+                        "model": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2"),
+                        "size": os.getenv("OPENAI_IMAGE_SIZE", "1024x1024"),
+                        "quality": os.getenv("OPENAI_IMAGE_QUALITY", "medium"),
+                    },
+                }
             yield {
                 "type": "agent_completed",
                 "payload": {
@@ -274,6 +345,11 @@ def _stringify_output(value: Any) -> str:
 
 
 def _extract_image_payload(result: Any) -> dict[str, Any] | None:
+    images = _extract_image_payloads(result)
+    return images[0] if images else None
+
+
+def _extract_image_payloads(result: Any) -> list[dict[str, Any]]:
     """Extract base64 image data from an Agents SDK RunResult.
 
     The ImageGenerationTool produces an ``image_generation_call`` output item
@@ -314,64 +390,75 @@ def _extract_image_payload(result: Any) -> dict[str, Any] | None:
         surfaces.append(final)
 
     # Convert everything to JSON-safe dicts and search
+    payloads: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for surface in surfaces:
         jsonable = _to_jsonable(surface)
-        b64 = _find_image_generation_result(jsonable)
-        if b64:
-            return {
-                "b64_json": b64,
-                "image_url": f"data:image/png;base64,{b64}",
-                "mime_type": "image/png",
-            }
+        for b64 in _find_image_generation_results(jsonable):
+            if b64 in seen:
+                continue
+            seen.add(b64)
+            payloads.append(
+                {
+                    "b64_json": b64,
+                    "image_url": f"data:image/png;base64,{b64}",
+                    "mime_type": "image/png",
+                }
+            )
 
-    return None
+    return payloads
 
 
 def _find_image_generation_result(value: Any) -> str | None:
+    results = _find_image_generation_results(value)
+    return results[0] if results else None
+
+
+def _find_image_generation_results(value: Any) -> list[str]:
     """Recursively search for a base64 image string in a JSON-safe structure.
 
     Looks for:
     - ``{"type": "image_generation_call", "result": "<base64>"}``
     - Any dict with a ``"b64_json"`` key containing a long base64 string
     """
+    results: list[str] = []
     if isinstance(value, dict):
         # Direct match: Responses API image_generation_call
         if value.get("type") == "image_generation_call" and isinstance(value.get("result"), str):
             result_val = value["result"]
             if len(result_val) > 100:  # base64 images are large
-                return result_val
+                results.append(result_val)
 
         # Alternative: some SDK versions use b64_json
         if isinstance(value.get("b64_json"), str) and len(value["b64_json"]) > 100:
-            return value["b64_json"]
+            results.append(value["b64_json"])
 
         # Recurse into all values
         for item in value.values():
-            found = _find_image_generation_result(item)
-            if found:
-                return found
+            results.extend(_find_image_generation_results(item))
 
     if isinstance(value, list):
         for item in value:
-            found = _find_image_generation_result(item)
-            if found:
-                return found
+            results.extend(_find_image_generation_results(item))
 
     # Handle long strings that look like base64 (fallback for edge cases)
     if isinstance(value, str) and len(value) > 1000:
         # Check if it looks like base64 (only alphanumeric + /+=)
         import re
         if re.fullmatch(r"[A-Za-z0-9+/=\s]+", value[:200]):
-            return value
+            results.append(value)
 
-    return None
+    return results
 
 
 def _to_jsonable(value: Any) -> Any:
     if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json")
+        try:
+            return value.model_dump(mode="json")
+        except Exception:
+            return str(value)
     if is_dataclass(value) and not isinstance(value, type):
-        return _to_jsonable(asdict(value))
+        return {field.name: _to_jsonable(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, dict):
         return {str(key): _to_jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):

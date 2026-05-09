@@ -54,3 +54,37 @@ class SkillDraftRequest(BaseModel):
 
 class SkillDraftResponse(SkillBase):
     pass
+
+
+class ChatSessionBase(BaseModel):
+    title: str = Field(default="New chat", min_length=1, max_length=160)
+
+
+class ChatSessionCreate(ChatSessionBase):
+    messages_json: list[dict] = Field(default_factory=list)
+    events_json: list[dict] = Field(default_factory=list)
+
+
+class ChatSessionUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    messages_json: list[dict] | None = None
+    events_json: list[dict] | None = None
+
+
+class ChatSessionSummary(ChatSessionBase):
+    id: str
+    message_count: int
+    event_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChatSessionRead(ChatSessionBase):
+    id: str
+    messages_json: list[dict]
+    events_json: list[dict]
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}

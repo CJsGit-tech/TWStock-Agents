@@ -1,6 +1,10 @@
 import unittest
+import asyncio
+import os
+from dataclasses import dataclass
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -61,12 +65,29 @@ class VisualizationDetectionTests(unittest.TestCase):
         self.assertFalse(_is_visualization_request("只看估值"))
 
 
+class ImageModelConfigTests(unittest.TestCase):
+    def test_default_image_model_is_gpt_image_2(self):
+        from financial_agents.agents import image_model
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(image_model(), "gpt-image-2")
+
+    def test_image_model_override_is_preserved(self):
+        from financial_agents.agents import image_model
+
+        with patch.dict(os.environ, {"OPENAI_IMAGE_MODEL": "custom-image-model"}):
+            self.assertEqual(image_model(), "custom-image-model")
+
+
 class ImagePayloadExtractionTests(unittest.TestCase):
     def test_extract_image_payload_from_response_item(self):
-        from financial_agents.orchestrator import _extract_image_payload
+        from financial_agents.orchestrator import _extract_image_payload, _extract_image_payloads
 
         class FakeResponse:
-            output = [{"type": "image_generation_call", "result": "abc123" + "x" * 200}]
+            output = [
+                {"type": "image_generation_call", "result": "abc123" + "x" * 200},
+                {"type": "image_generation_call", "result": "def456" + "y" * 200},
+            ]
 
         class FakeResult:
             final_output = ""
@@ -77,6 +98,9 @@ class ImagePayloadExtractionTests(unittest.TestCase):
         self.assertIsNotNone(image)
         self.assertTrue(image["b64_json"].startswith("abc123"))
         self.assertTrue(image["image_url"].startswith("data:image/png;base64,"))
+        images = _extract_image_payloads(FakeResult())
+        self.assertEqual(len(images), 2)
+        self.assertTrue(images[1]["b64_json"].startswith("def456"))
 
     def test_extract_image_payload_from_new_items(self):
         from financial_agents.orchestrator import _extract_image_payload
@@ -103,6 +127,22 @@ class ImagePayloadExtractionTests(unittest.TestCase):
             raw_responses = []
 
         self.assertIsNone(_extract_image_payload(FakeResult()))
+
+
+class EventSerializationTests(unittest.TestCase):
+    def test_jsonable_does_not_deepcopy_asyncio_future(self):
+        from financial_agents.orchestrator import _to_jsonable
+
+        @dataclass
+        class RuntimeCarrier:
+            future: asyncio.Future
+
+        loop = asyncio.new_event_loop()
+        self.addCleanup(loop.close)
+
+        value = _to_jsonable(RuntimeCarrier(future=loop.create_future()))
+
+        self.assertIn("Future", value["future"])
 
 
 if __name__ == "__main__":

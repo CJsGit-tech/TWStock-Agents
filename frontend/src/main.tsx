@@ -6,16 +6,24 @@ import {
   ChevronDown,
   CircleHelp,
   Compass,
+  Copy,
+  Download,
+  ExternalLink,
   Languages,
   Loader2,
+  MessageSquare,
   Mic,
+  Pencil,
+  Plus,
   Send,
   Server,
   ShieldCheck,
   TerminalSquare,
+  Trash2,
   WandSparkles,
   Wrench,
   X,
+  ZoomIn,
 } from "lucide-react";
 import "./styles.css";
 
@@ -52,6 +60,8 @@ interface Message {
   role: Role;
   content: string;
   images?: GeneratedImage[];
+  activities?: ActivityItem[];
+  activitiesComplete?: boolean;
 }
 
 interface StreamEvent {
@@ -64,9 +74,39 @@ interface StreamEvent {
 }
 
 interface GeneratedImage {
+  id: string;
   title: string;
   description: string;
   imageUrl?: string;
+  previewUrl?: string;
+  agent?: string;
+  skillId?: string;
+  traceId?: string;
+  traceUrl?: string;
+  createdAt?: string;
+  status?: "loading" | "ready";
+}
+
+interface ActivityItem {
+  id: string;
+  type: string;
+  label: string;
+  createdAt: string;
+}
+
+interface ChatSessionSummary {
+  id: string;
+  title: string;
+  message_count: number;
+  event_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ChatSessionRead extends ChatSessionSummary {
+  messages_json: Message[];
+  events_json: StreamEvent[];
+  is_active: boolean;
 }
 
 interface Skill {
@@ -100,6 +140,8 @@ interface GuidedExample {
 type Workflow = "chat" | "financial" | "agentic";
 type Locale = "en" | "zh-TW" | "ja";
 type StatusKey = "ready" | "streaming" | "complete" | "error";
+type ActivityTab = "sessions" | "events";
+type ImageZoomMode = "fit" | "actual";
 
 interface ActiveGuide {
   flowId: string;
@@ -284,12 +326,44 @@ const TRANSLATIONS = {
     back: "Back",
     done: "Done",
     eventHistory: "Event History",
+    chatSessions: "Chat Sessions",
+    newChat: "New chat",
+    noSessions: "No saved chats yet.",
+    openChatSession: "Open chat session",
+    deleteChatSession: "Delete chat session",
+    messageCount: (count: number) => `${count} messages`,
+    eventCount: (count: number) => `${count} events`,
     noEvents: "Reasoning and tool events will appear here.",
     currentEvent: "Current Event",
     collapse: "Collapse",
     expand: "Expand",
+    latestEvent: "Latest event",
+    openRoundLogs: "Open round logs",
+    roundLogs: "Round logs",
     round: (index: number) => `Round ${index}`,
     language: "Language",
+    visualArtifacts: "Visual artifacts",
+    imageGenerating: "Generating image...",
+    viewImage: "View",
+    downloadImage: "Download",
+    copyImage: "Copy image",
+    openImage: "Open",
+    imageLightboxTitle: "Generated visual",
+    zoomFit: "Fit",
+    zoomActual: "Actual size",
+    liveActivity: "Agent activity",
+    activityPlanning: "Planning specialist skills",
+    activityPlanReady: "Execution plan ready",
+    activityManagerStarted: "Running specialist agents",
+    activitySynthesizing: "Synthesizing final answer",
+    activityTraceReady: "Trace ready",
+    activityGeneratingVisualization: "Generating visualization",
+    activityNoSkills: "No matching skills; researching directly",
+    activityCompleted: "Completed",
+    viewEvents: "View events",
+    activityRunningAgent: (name: string) => `Running ${name}`,
+    activityFinishedAgent: (name: string) => `Completed ${name}`,
+    activitySelectedSkill: (name: string) => `Selected ${name}`,
   },
   "zh-TW": {
     eyebrow: "財務分析 + FastMCP 工具",
@@ -350,12 +424,44 @@ const TRANSLATIONS = {
     back: "返回",
     done: "完成",
     eventHistory: "事件紀錄",
+    chatSessions: "聊天紀錄",
+    newChat: "新聊天",
+    noSessions: "尚無已儲存聊天。",
+    openChatSession: "開啟聊天紀錄",
+    deleteChatSession: "刪除聊天紀錄",
+    messageCount: (count: number) => `${count} 則訊息`,
+    eventCount: (count: number) => `${count} 個事件`,
     noEvents: "推理與工具事件會顯示在這裡。",
     currentEvent: "目前事件",
     collapse: "收合",
     expand: "展開",
+    latestEvent: "最新事件",
+    openRoundLogs: "開啟回合紀錄",
+    roundLogs: "回合紀錄",
     round: (index: number) => `第 ${index} 回合`,
     language: "語言",
+    visualArtifacts: "視覺產物",
+    imageGenerating: "正在產生圖片...",
+    viewImage: "檢視",
+    downloadImage: "下載",
+    copyImage: "複製圖片",
+    openImage: "開啟",
+    imageLightboxTitle: "生成圖片",
+    zoomFit: "符合視窗",
+    zoomActual: "原始大小",
+    liveActivity: "Agent 動態",
+    activityPlanning: "正在規劃 specialist 技能",
+    activityPlanReady: "執行計畫已建立",
+    activityManagerStarted: "正在執行 specialist agents",
+    activitySynthesizing: "正在整合最終回答",
+    activityTraceReady: "Trace 已建立",
+    activityGeneratingVisualization: "正在產生視覺化",
+    activityNoSkills: "沒有符合技能，改由 manager 直接研究",
+    activityCompleted: "已完成",
+    viewEvents: "查看事件",
+    activityRunningAgent: (name: string) => `正在執行 ${name}`,
+    activityFinishedAgent: (name: string) => `${name} 已完成`,
+    activitySelectedSkill: (name: string) => `已選擇 ${name}`,
   },
   ja: {
     eyebrow: "財務分析 + FastMCP ツール",
@@ -416,12 +522,44 @@ const TRANSLATIONS = {
     back: "戻る",
     done: "完了",
     eventHistory: "イベント履歴",
+    chatSessions: "チャット履歴",
+    newChat: "新規チャット",
+    noSessions: "保存済みチャットはありません。",
+    openChatSession: "チャット履歴を開く",
+    deleteChatSession: "チャット履歴を削除",
+    messageCount: (count: number) => `${count} 件のメッセージ`,
+    eventCount: (count: number) => `${count} 件のイベント`,
     noEvents: "推論とツールイベントがここに表示されます。",
     currentEvent: "現在のイベント",
     collapse: "折りたたむ",
     expand: "展開",
+    latestEvent: "最新イベント",
+    openRoundLogs: "ラウンドログを開く",
+    roundLogs: "ラウンドログ",
     round: (index: number) => `ラウンド ${index}`,
     language: "言語",
+    visualArtifacts: "ビジュアル成果物",
+    imageGenerating: "画像を生成中...",
+    viewImage: "表示",
+    downloadImage: "ダウンロード",
+    copyImage: "画像をコピー",
+    openImage: "開く",
+    imageLightboxTitle: "生成画像",
+    zoomFit: "フィット",
+    zoomActual: "実寸",
+    liveActivity: "Agent アクティビティ",
+    activityPlanning: "Specialist スキルを計画中",
+    activityPlanReady: "実行計画を作成済み",
+    activityManagerStarted: "Specialist agents を実行中",
+    activitySynthesizing: "最終回答を統合中",
+    activityTraceReady: "Trace 準備完了",
+    activityGeneratingVisualization: "ビジュアルを生成中",
+    activityNoSkills: "一致するスキルなし。Manager が直接調査中",
+    activityCompleted: "完了",
+    viewEvents: "イベントを見る",
+    activityRunningAgent: (name: string) => `${name} を実行中`,
+    activityFinishedAgent: (name: string) => `${name} が完了`,
+    activitySelectedSkill: (name: string) => `${name} を選択`,
   },
 } satisfies Record<Locale, Record<string, string | ((...args: never[]) => string)>>;
 
@@ -430,20 +568,28 @@ function initialLocale(): Locale {
   return stored === "zh-TW" || stored === "ja" || stored === "en" ? stored : "en";
 }
 
-function App() {
-  const [locale, setLocale] = useState<Locale>(initialLocale);
-  const t = TRANSLATIONS[locale] as typeof TRANSLATIONS.en;
-  const [messages, setMessages] = useState<Message[]>([
+function initialMessages(locale: Locale): Message[] {
+  return [
     {
       id: crypto.randomUUID(),
       role: "assistant",
-      content: TRANSLATIONS[initialLocale()].assistantIntro,
+      content: TRANSLATIONS[locale].assistantIntro,
     },
-  ]);
+  ];
+}
+
+function App() {
+  const [locale, setLocale] = useState<Locale>(initialLocale);
+  const t = TRANSLATIONS[locale] as typeof TRANSLATIONS.en;
+  const [messages, setMessages] = useState<Message[]>(() => initialMessages(initialLocale()));
   const [input, setInput] = useState("");
   const [currentEvent, setCurrentEvent] = useState<StreamEvent | null>(null);
   const [eventHistory, setEventHistory] = useState<StreamEvent[]>([]);
-  const [collapsedRounds, setCollapsedRounds] = useState<Set<string>>(new Set());
+  const [chatSessions, setChatSessions] = useState<ChatSessionSummary[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [activityTab, setActivityTab] = useState<ActivityTab>("sessions");
+  const [showSkillDrawer, setShowSkillDrawer] = useState(false);
+  const [selectedRoundId, setSelectedRoundId] = useState<string | null>(null);
   const [tutorialStep, setTutorialStep] = useState(0);
   const [showTutorial, setShowTutorial] = useState(false);
   const [activeGuide, setActiveGuide] = useState<ActiveGuide | null>(null);
@@ -461,14 +607,21 @@ function App() {
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
   const [apiKeyMessage, setApiKeyMessage] = useState("");
+  const [selectedImage, setSelectedImage] = useState<GeneratedImage | null>(null);
+  const [imageZoomMode, setImageZoomMode] = useState<ImageZoomMode>("fit");
   const [voiceMessage, setVoiceMessage] = useState("");
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const eventOrderRef = useRef(0);
   const streamingRef = useRef(false);
+  const sessionLoadingRef = useRef(false);
+  const sessionSaveTimerRef = useRef<number | null>(null);
   const shouldShowStarters = !isStreaming;
   const activeExample = activeGuide ? GUIDED_EXAMPLES.find((example) => example.id === activeGuide.flowId) : null;
+  const visibleEvents = allEvents(currentEvent, eventHistory);
+  const eventGroups = groupedEvents(visibleEvents, messages);
+  const selectedRound = eventGroups.find((group) => group.messageId === selectedRoundId) ?? null;
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -477,7 +630,26 @@ function App() {
   useEffect(() => {
     loadSkills();
     loadOpenAIKeyStatus();
+    initializeChatSessions();
   }, []);
+
+  useEffect(() => {
+    if (!activeSessionId || sessionLoadingRef.current) {
+      return;
+    }
+    if (sessionSaveTimerRef.current) {
+      window.clearTimeout(sessionSaveTimerRef.current);
+    }
+    sessionSaveTimerRef.current = window.setTimeout(() => {
+      saveActiveSession().catch((error) => console.error("Chat session autosave failed", error));
+    }, 650);
+
+    return () => {
+      if (sessionSaveTimerRef.current) {
+        window.clearTimeout(sessionSaveTimerRef.current);
+      }
+    };
+  }, [activeSessionId, messages, currentEvent, eventHistory]);
 
   useEffect(() => {
     const maxPage = Math.max(0, Math.ceil(skills.length / SKILLS_PAGE_SIZE) - 1);
@@ -636,6 +808,138 @@ function App() {
       setApiKeyConfigured(data.configured);
     } catch {
       // Non-critical status check; stream errors still surface the setup panel.
+    }
+  }
+
+  async function initializeChatSessions() {
+    try {
+      const sessions = await fetchChatSessions();
+      if (sessions.length > 0) {
+        await openChatSession(sessions[0].id, sessions);
+      } else {
+        await createChatSession();
+      }
+    } catch (error) {
+      console.error("Chat session initialization failed", error);
+    }
+  }
+
+  async function fetchChatSessions(): Promise<ChatSessionSummary[]> {
+    const response = await fetch(`${API_BASE}/api/chat-sessions`);
+    if (!response.ok) {
+      throw new Error(`Chat sessions load failed with HTTP ${response.status}`);
+    }
+    const sessions = (await response.json()) as ChatSessionSummary[];
+    setChatSessions(sessions);
+    return sessions;
+  }
+
+  async function createChatSession() {
+    const seedMessages = initialMessages(locale);
+    sessionLoadingRef.current = true;
+    try {
+      const response = await fetch(`${API_BASE}/api/chat-sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: t.newChat,
+          messages_json: seedMessages,
+          events_json: [],
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`Chat session create failed with HTTP ${response.status}`);
+      }
+      const created = (await response.json()) as ChatSessionRead;
+      setActiveSessionId(created.id);
+      setMessages(sanitizeMessages(created.messages_json, locale));
+      setEventHistory([]);
+      setCurrentEvent(null);
+      setSelectedRoundId(null);
+      setActiveGuide(null);
+      setInput("");
+      eventOrderRef.current = 0;
+      await fetchChatSessions();
+    } finally {
+      sessionLoadingRef.current = false;
+    }
+  }
+
+  async function openChatSession(sessionId: string, knownSessions = chatSessions) {
+    if (sessionId === activeSessionId) {
+      return;
+    }
+    sessionLoadingRef.current = true;
+    try {
+      const response = await fetch(`${API_BASE}/api/chat-sessions/${sessionId}`);
+      if (!response.ok) {
+        throw new Error(`Chat session load failed with HTTP ${response.status}`);
+      }
+      const loaded = (await response.json()) as ChatSessionRead;
+      const loadedEvents = sanitizeEvents(loaded.events_json);
+      setActiveSessionId(loaded.id);
+      setMessages(sanitizeMessages(loaded.messages_json, locale));
+      setEventHistory(loadedEvents);
+      setCurrentEvent(null);
+      setSelectedRoundId(null);
+      setActiveGuide(null);
+      setInput("");
+      eventOrderRef.current = nextEventOrder(loadedEvents);
+      if (knownSessions.length === 0) {
+        await fetchChatSessions();
+      }
+    } finally {
+      sessionLoadingRef.current = false;
+    }
+  }
+
+  async function saveActiveSession() {
+    if (!activeSessionId) {
+      return;
+    }
+    const events = sanitizeEvents(allEvents(currentEvent, eventHistory));
+    const title = sessionTitle(messages, t.newChat);
+    const response = await fetch(`${API_BASE}/api/chat-sessions/${activeSessionId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title,
+        messages_json: messages,
+        events_json: events,
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(`Chat session save failed with HTTP ${response.status}`);
+    }
+    setChatSessions((current) =>
+      current
+        .map((session) =>
+          session.id === activeSessionId
+            ? {
+                ...session,
+                title,
+                message_count: messages.length,
+                event_count: events.length,
+                updated_at: new Date().toISOString(),
+              }
+            : session,
+        )
+        .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at)),
+    );
+  }
+
+  async function deleteChatSession(sessionId: string) {
+    const response = await fetch(`${API_BASE}/api/chat-sessions/${sessionId}`, { method: "DELETE" });
+    if (!response.ok) {
+      throw new Error(`Chat session delete failed with HTTP ${response.status}`);
+    }
+    const remaining = await fetchChatSessions();
+    if (sessionId === activeSessionId) {
+      if (remaining.length > 0) {
+        await openChatSession(remaining[0].id, remaining);
+      } else {
+        await createChatSession();
+      }
     }
   }
 
@@ -834,31 +1138,37 @@ function App() {
     }
 
     if (type === "agent_started") {
+      appendAssistantActivity(assistantId, type, activityLabel(type, payload, t));
       appendEvent(assistantId, type, `Agent started: ${String(payload.agent ?? "unknown")}`, summarize(payload));
       return false;
     }
 
     if (type === "agent_completed") {
+      appendAssistantActivity(assistantId, type, activityLabel(type, payload, t));
       appendEvent(assistantId, type, `Agent completed: ${String(payload.agent ?? "unknown")}`, summarize(payload));
       return false;
     }
 
     if (type === "manager_started") {
+      appendAssistantActivity(assistantId, type, activityLabel(type, payload, t));
       appendEvent(assistantId, type, "Manager started", summarize(payload));
       return false;
     }
 
     if (type === "manager_planning_started") {
+      appendAssistantActivity(assistantId, type, activityLabel(type, payload, t));
       appendEvent(assistantId, type, "Manager planning started", summarize(payload));
       return false;
     }
 
     if (type === "execution_plan_created") {
+      appendAssistantActivity(assistantId, type, activityLabel(type, payload, t));
       appendEvent(assistantId, type, "Execution plan created", summarize(payload));
       return false;
     }
 
     if (type === "skill_selected_by_manager") {
+      appendAssistantActivity(assistantId, type, activityLabel(type, payload, t));
       appendEvent(
         assistantId,
         type,
@@ -879,21 +1189,36 @@ function App() {
     }
 
     if (type === "no_relevant_skills") {
+      appendAssistantActivity(assistantId, type, activityLabel(type, payload, t));
       appendEvent(assistantId, type, "No matching skills", summarize(payload));
       return false;
     }
 
+    if (type === "trace_started") {
+      appendAssistantActivity(assistantId, type, activityLabel(type, payload, t));
+      appendEvent(assistantId, type, `Trace started: ${String(payload.workflow ?? "workflow")}`, summarize(payload));
+      return false;
+    }
+
+    if (type === "trace_completed") {
+      appendEvent(assistantId, type, `Trace completed: ${String(payload.workflow ?? "workflow")}`, summarize(payload));
+      return false;
+    }
+
     if (type === "manager_completed") {
+      appendAssistantActivity(assistantId, type, activityLabel(type, payload, t));
       appendEvent(assistantId, type, "Manager completed", summarize(payload));
       return false;
     }
 
     if (type === "specialist_started") {
+      appendAssistantActivity(assistantId, type, activityLabel(type, payload, t));
       appendEvent(assistantId, type, `Specialist started: ${String(payload.agent ?? "unknown")}`, summarize(payload));
       return false;
     }
 
     if (type === "specialist_completed") {
+      appendAssistantActivity(assistantId, type, activityLabel(type, payload, t));
       appendEvent(assistantId, type, `Specialist completed: ${String(payload.agent ?? "unknown")}`, summarize(payload));
       return false;
     }
@@ -905,10 +1230,43 @@ function App() {
 
     if (type === "image_generated") {
       appendEvent(assistantId, type, `Image generated: ${String(payload.title ?? "visual summary")}`, summarize(payload));
-      appendAssistantImage(assistantId, {
+      const imageUrl = imageUrlFromPayload(payload.image);
+      const imageId = String(payload.id ?? crypto.randomUUID());
+      upsertAssistantImage(assistantId, {
+        id: imageId,
         title: String(payload.title ?? "Financial visual summary"),
         description: String(payload.description ?? ""),
-        imageUrl: imageUrlFromPayload(payload.image),
+        imageUrl,
+        agent: typeof payload.agent === "string" ? payload.agent : undefined,
+        skillId: typeof payload.skill_id === "string" ? payload.skill_id : undefined,
+        traceId: typeof payload.trace_id === "string" ? payload.trace_id : undefined,
+        traceUrl: typeof payload.trace_url === "string" ? payload.trace_url : undefined,
+        createdAt: new Date().toISOString(),
+        status: "ready",
+      });
+      if (imageUrl) {
+        createImagePreview(imageUrl).then((previewUrl) => {
+          if (previewUrl) {
+            upsertAssistantImage(assistantId, { id: imageId, title: "", description: "", previewUrl });
+          }
+        });
+      }
+      return false;
+    }
+
+    if (type === "image_generation_started") {
+      appendAssistantActivity(assistantId, type, activityLabel(type, payload, t));
+      appendEvent(assistantId, type, `Image generation started: ${String(payload.title ?? "visual summary")}`, summarize(payload));
+      upsertAssistantImage(assistantId, {
+        id: String(payload.id ?? crypto.randomUUID()),
+        title: String(payload.title ?? "Financial visual summary"),
+        description: String(payload.description ?? t.imageGenerating),
+        agent: typeof payload.agent === "string" ? payload.agent : undefined,
+        skillId: typeof payload.skill_id === "string" ? payload.skill_id : undefined,
+        traceId: typeof payload.trace_id === "string" ? payload.trace_id : undefined,
+        traceUrl: typeof payload.trace_url === "string" ? payload.trace_url : undefined,
+        createdAt: new Date().toISOString(),
+        status: "loading",
       });
       return false;
     }
@@ -918,11 +1276,15 @@ function App() {
     }
 
     if (type === "done") {
+      completeAssistantActivities(assistantId);
       return false;
     }
 
     if (type === "error") {
       const message = String(payload.message ?? "Unknown error");
+      const errorType = String(payload.error_type ?? "");
+      const traceback = typeof payload.traceback === "string" ? payload.traceback.trim() : "";
+      const detail = traceback ? `${message}\n\n${traceback}` : message;
       if (message.includes("OPENAI_API_KEY")) {
         setShowApiKeyPanel(true);
         setApiKeyConfigured(false);
@@ -932,9 +1294,13 @@ function App() {
           `\n\n${t.apiKeyMissing}`,
         );
       } else {
-        appendAssistantText(assistantId, `\n\n${message}`);
+        const heading = errorType ? `${errorType}: ${message}` : message;
+        appendAssistantText(
+          assistantId,
+          traceback ? `\n\n${heading}\n\n\`\`\`text\n${traceback}\n\`\`\`` : `\n\n${heading}`,
+        );
       }
-      appendEvent(assistantId, type, "Backend error", message);
+      appendEvent(assistantId, type, errorType ? `Backend error: ${errorType}` : "Backend error", detail);
       return true;
     }
 
@@ -950,11 +1316,57 @@ function App() {
     );
   }
 
-  function appendAssistantImage(id: string, image: GeneratedImage) {
+  function upsertAssistantImage(id: string, image: GeneratedImage) {
     setMessages((current) =>
       current.map((message) =>
-        message.id === id ? { ...message, images: [...(message.images ?? []), image] } : message,
+        message.id === id
+          ? {
+              ...message,
+              images: (message.images ?? []).some((existing) => existing.id === image.id)
+                ? (message.images ?? []).map((existing) =>
+                    existing.id === image.id
+                      ? {
+                          ...existing,
+                          ...image,
+                          title: image.title || existing.title,
+                          description: image.description || existing.description,
+                          imageUrl: image.imageUrl || existing.imageUrl,
+                        }
+                      : existing,
+                  )
+                : [...(message.images ?? []), image],
+            }
+          : message,
       ),
+    );
+  }
+
+  function appendAssistantActivity(id: string, type: string, label: string) {
+    if (!label) {
+      return;
+    }
+    setMessages((current) =>
+      current.map((message) => {
+        if (message.id !== id) {
+          return message;
+        }
+        const activities = message.activities ?? [];
+        const previous = activities[activities.length - 1];
+        if (previous?.type === type && previous.label === label) {
+          return message;
+        }
+        return {
+          ...message,
+          activities: [...activities, { id: crypto.randomUUID(), type, label, createdAt: new Date().toISOString() }],
+          activitiesComplete: false,
+        };
+      }),
+    );
+  }
+
+  function completeAssistantActivities(id: string) {
+    setMessages((current) =>
+      current.map((message) => (message.id === id ? { ...message, activitiesComplete: true } : message)),
     );
   }
 
@@ -981,169 +1393,71 @@ function App() {
     <>
     <main className="app-shell">
       <section className="workspace">
-        <header className="topbar">
-          <div>
-            <div className="eyebrow">
-              <Server size={13} />
-              {t.eyebrow}
-            </div>
-            <h1>{t.title}</h1>
-          </div>
-          <div className="topbar-actions">
-            <label className="language-switcher" aria-label={t.language}>
-              <Languages size={15} />
-              <select value={locale} onChange={(event) => changeLocale(event.target.value as Locale)}>
-                {Object.entries(LANGUAGE_LABELS).map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button className="guide-button" type="button" onClick={showGuide}>
-              <CircleHelp size={15} />
-              {t.guide}
-            </button>
-            <div className="status-pill" data-active={isStreaming}>
-              {isStreaming ? <Loader2 className="spin" size={15} /> : <CheckCircle2 size={15} />}
-              {t[status]}
-            </div>
-          </div>
-        </header>
+        <AppHeader
+          locale={locale}
+          status={status}
+          isStreaming={isStreaming}
+          onLocaleChange={changeLocale}
+          onShowGuide={showGuide}
+          t={t}
+        />
 
         <div className="main-grid">
-          <section className="chat-panel" aria-label="Chat conversation">
-            <div className="message-list">
-              {messages.map((message) => (
-                <article key={message.id} className={`message ${message.role}`}>
-                  <span className="role-label">{message.role}</span>
-                  <p>{message.content || (message.role === "assistant" && isStreaming ? "..." : "")}</p>
-                  {message.images?.map((image) => (
-                    <div className="image-attachment" key={`${message.id}-${image.title}`}>
-                      <strong>{image.title}</strong>
-                      {image.imageUrl ? <img src={image.imageUrl} alt={image.title} /> : null}
-                      {image.imageUrl ? (
-                        <a className="image-download" href={image.imageUrl} download={`${safeFileName(image.title)}.png`}>
-                          Download image
-                        </a>
-                      ) : null}
-                      {image.description ? <small>{image.description}</small> : null}
-                    </div>
-                  ))}
-                </article>
-              ))}
-              <div ref={bottomRef} />
-            </div>
+          <ActivityRail
+            activeTab={activityTab}
+            sessions={chatSessions}
+            activeSessionId={activeSessionId}
+            eventGroups={eventGroups}
+            currentEventId={currentEvent?.id}
+            onTabChange={setActivityTab}
+            onNewSession={createChatSession}
+            onOpenSession={openChatSession}
+            onDeleteSession={deleteChatSession}
+            onOpenRound={(messageId) => setSelectedRoundId(messageId)}
+            t={t}
+          />
 
-            {(showTutorial || shouldShowStarters) && (
-              <section className={`starter-area ${showTutorial ? "with-tutorial" : ""}`} aria-label="Getting started">
-                {showTutorial && (
-                  <TutorialPanel
-                    step={tutorialStep}
-                    steps={TUTORIAL_STEPS}
-                    t={t}
-                    onBack={() => setTutorialStep((current) => Math.max(0, current - 1))}
-                    onNext={() =>
-                      setTutorialStep((current) => Math.min(TUTORIAL_STEPS.length - 1, current + 1))
-                    }
-                    onDone={dismissTutorial}
-                  />
-                )}
+          <ChatWorkspace
+            messages={messages}
+            isStreaming={isStreaming}
+            input={input}
+            showTutorial={showTutorial}
+            shouldShowStarters={shouldShowStarters}
+            tutorialStep={tutorialStep}
+            activeExample={activeExample}
+            activeGuide={activeGuide}
+            showApiKeyPanel={showApiKeyPanel}
+            apiKeyConfigured={apiKeyConfigured}
+            apiKeyInput={apiKeyInput}
+            apiKeyMessage={apiKeyMessage}
+            selectedSkillCount={selectedSkillIds.length}
+            isListening={isListening}
+            voiceMessage={voiceMessage}
+            bottomRef={bottomRef}
+            onInputChange={setInput}
+            onKeyDown={handleKeyDown}
+            onSubmit={handleSubmit}
+            onTutorialBack={() => setTutorialStep((current) => Math.max(0, current - 1))}
+            onTutorialNext={() => setTutorialStep((current) => Math.min(TUTORIAL_STEPS.length - 1, current + 1))}
+            onTutorialDone={dismissTutorial}
+            onStartGuide={startGuidedExample}
+            onContinueGuide={continueGuidedExample}
+            onResetGuide={() => setActiveGuide(null)}
+            onToggleApiKeyPanel={() => setShowApiKeyPanel((current) => !current)}
+            onApiKeyInputChange={setApiKeyInput}
+            onSaveOpenAIKey={saveOpenAIKey}
+            onOpenSkills={() => setShowSkillDrawer(true)}
+            onToggleVoiceInput={toggleVoiceInput}
+            onViewImage={(image) => {
+              setImageZoomMode("fit");
+              setSelectedImage(image);
+            }}
+            onOpenEvents={(messageId) => setSelectedRoundId(messageId)}
+            t={t}
+          />
 
-                {shouldShowStarters && (
-                  <GuidedStarter
-                    examples={GUIDED_EXAMPLES}
-                    activeExample={activeExample}
-                    activeGuide={activeGuide}
-                    t={t}
-                    onStart={startGuidedExample}
-                    onContinue={continueGuidedExample}
-                    onReset={() => setActiveGuide(null)}
-                  />
-                )}
-              </section>
-            )}
-
-            <form className="composer" onSubmit={handleSubmit}>
-              <label className="sr-only" htmlFor="message">
-                {t.messageLabel}
-              </label>
-              <textarea
-                id="message"
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder={t.placeholder}
-                rows={1}
-              />
-              <div className={`api-key-panel ${showApiKeyPanel ? "open" : ""}`} aria-hidden={!showApiKeyPanel}>
-                <div>
-                  <strong>{t.apiKeyTitle}</strong>
-                  <small>
-                    {apiKeyConfigured
-                      ? t.apiKeyConfigured
-                      : t.apiKeyNeeded}
-                  </small>
-                </div>
-                <div className="api-key-controls">
-                  <input
-                    type="password"
-                    value={apiKeyInput}
-                    onChange={(event) => setApiKeyInput(event.target.value)}
-                    placeholder={t.apiKeyPlaceholder}
-                    autoComplete="off"
-                  />
-                  <button type="button" onClick={saveOpenAIKey}>
-                    {t.saveKey}
-                  </button>
-                </div>
-                {apiKeyMessage ? <p>{apiKeyMessage}</p> : null}
-              </div>
-              <div className="composer-toolbar" aria-label="Composer controls">
-                <div className="composer-tools">
-                  <button
-                    type="button"
-                    className={`composer-icon-button compass-button ${showApiKeyPanel ? "open" : ""}`}
-                    aria-label={t.openApiSettings}
-                    aria-expanded={showApiKeyPanel}
-                    onClick={() => setShowApiKeyPanel((current) => !current)}
-                  >
-                    <Compass size={18} />
-                  </button>
-                  <span className="composer-mode-pill">
-                    <ShieldCheck size={14} />
-                    {t.requiredSkillsCount(selectedSkillIds.length)}
-                    <ChevronDown size={14} />
-                  </span>
-                </div>
-                <div className="composer-actions">
-                  <span className="composer-model-pill">{t.managerAgent}</span>
-                  <button
-                    type="button"
-                    className={`composer-icon-button ${isListening ? "listening" : ""}`}
-                    aria-label={isListening ? t.stopVoiceInput : t.voiceInput}
-                    title={isListening ? t.stopVoiceInput : t.voiceInput}
-                    onClick={toggleVoiceInput}
-                  >
-                    <Mic size={16} />
-                  </button>
-                  <button
-                    type="submit"
-                    className="composer-send-button"
-                    disabled={isStreaming || !input.trim()}
-                    aria-label={t.sendMessage}
-                  >
-                    <Send size={17} />
-                    <span>{t.send}</span>
-                  </button>
-                </div>
-              </div>
-              {voiceMessage ? <p className="composer-notice">{voiceMessage}</p> : null}
-            </form>
-          </section>
-
-          <aside className="side-panel" aria-label="Task setup and event history">
-            <SkillWorkbench
+          <aside className={`side-panel ${showSkillDrawer ? "open" : ""}`} aria-label="Task setup">
+            <SkillDrawer
               skills={skills}
               selectedSkillIds={selectedSkillIds}
               editingSkillId={editingSkillId}
@@ -1154,32 +1468,9 @@ function App() {
               onDeleteSkill={deleteSkill}
               onNewSkill={newSkill}
               onPageChange={setSkillPage}
+              onClose={() => setShowSkillDrawer(false)}
               t={t}
             />
-
-            <section className="event-panel" aria-label={t.eventHistory}>
-              <section className="history-section">
-                <div className="panel-title">
-                  <Brain size={15} />
-                  {t.eventHistory}
-                </div>
-                <div className="event-list">
-                  {allEvents(currentEvent, eventHistory).length === 0 ? (
-                    <p className="empty-event">{t.noEvents}</p>
-                  ) : (
-                    groupedEvents(allEvents(currentEvent, eventHistory), messages).map((group) => (
-                      <RoundEventGroup
-                        key={group.messageId}
-                        group={group}
-                        currentEventId={currentEvent?.id}
-                        collapsed={collapsedRounds.has(group.messageId)}
-                        onToggle={() => toggleRound(group.messageId)}
-                      />
-                    ))
-                  )}
-                </div>
-              </section>
-            </section>
           </aside>
         </div>
       </section>
@@ -1200,23 +1491,563 @@ function App() {
         t={t}
       />
     ) : null}
+    {selectedRound ? (
+      <RoundLogModal
+        group={selectedRound}
+        currentEventId={currentEvent?.id}
+        onClose={() => setSelectedRoundId(null)}
+        t={t}
+      />
+    ) : null}
+    {selectedImage ? (
+      <ImageLightbox
+        image={selectedImage}
+        zoomMode={imageZoomMode}
+        onZoomModeChange={setImageZoomMode}
+        onClose={() => setSelectedImage(null)}
+        t={t}
+      />
+    ) : null}
     </>
   );
-
-  function toggleRound(messageId: string) {
-    setCollapsedRounds((current) => {
-      const next = new Set(current);
-      if (next.has(messageId)) {
-        next.delete(messageId);
-      } else {
-        next.add(messageId);
-      }
-      return next;
-    });
-  }
 }
 
-function SkillWorkbench({
+function AppHeader({
+  locale,
+  status,
+  isStreaming,
+  onLocaleChange,
+  onShowGuide,
+  t,
+}: {
+  locale: Locale;
+  status: StatusKey;
+  isStreaming: boolean;
+  onLocaleChange: (locale: Locale) => void;
+  onShowGuide: () => void;
+  t: typeof TRANSLATIONS.en;
+}) {
+  return (
+    <header className="topbar">
+      <div className="brand-block">
+        <div className="eyebrow">
+          <Server size={13} />
+          {t.eyebrow}
+        </div>
+        <h1>{t.title}</h1>
+      </div>
+      <div className="topbar-actions">
+        <label className="language-switcher" aria-label={t.language}>
+          <Languages size={15} />
+          <select value={locale} onChange={(event) => onLocaleChange(event.target.value as Locale)}>
+            {Object.entries(LANGUAGE_LABELS).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button className="guide-button" type="button" onClick={onShowGuide}>
+          <CircleHelp size={15} />
+          {t.guide}
+        </button>
+        <div className="status-pill" data-active={isStreaming}>
+          {isStreaming ? <Loader2 className="spin" size={15} /> : <CheckCircle2 size={15} />}
+          {t[status]}
+        </div>
+      </div>
+    </header>
+  );
+}
+
+function ActivityRail({
+  activeTab,
+  sessions,
+  activeSessionId,
+  eventGroups,
+  currentEventId,
+  onTabChange,
+  onNewSession,
+  onOpenSession,
+  onDeleteSession,
+  onOpenRound,
+  t,
+}: {
+  activeTab: ActivityTab;
+  sessions: ChatSessionSummary[];
+  activeSessionId: string | null;
+  eventGroups: EventGroup[];
+  currentEventId?: string;
+  onTabChange: (tab: ActivityTab) => void;
+  onNewSession: () => void;
+  onOpenSession: (id: string) => void;
+  onDeleteSession: (id: string) => void;
+  onOpenRound: (messageId: string) => void;
+  t: typeof TRANSLATIONS.en;
+}) {
+  return (
+    <aside className="activity-rail" aria-label={`${t.chatSessions} and ${t.eventHistory}`}>
+      <div className="activity-tabs" role="tablist">
+        <button
+          type="button"
+          className={activeTab === "sessions" ? "active" : ""}
+          onClick={() => onTabChange("sessions")}
+          role="tab"
+          aria-selected={activeTab === "sessions"}
+        >
+          <MessageSquare size={15} />
+          {t.chatSessions}
+        </button>
+        <button
+          type="button"
+          className={activeTab === "events" ? "active" : ""}
+          onClick={() => onTabChange("events")}
+          role="tab"
+          aria-selected={activeTab === "events"}
+        >
+          <Brain size={15} />
+          {t.eventHistory}
+        </button>
+      </div>
+
+      {activeTab === "sessions" ? (
+        <section className="activity-panel" aria-label={t.chatSessions}>
+          <button type="button" className="new-session-button" onClick={onNewSession}>
+            <Plus size={15} />
+            {t.newChat}
+          </button>
+          <div className="session-list">
+            {sessions.length === 0 ? (
+              <p className="empty-event">{t.noSessions}</p>
+            ) : (
+              sessions.map((session) => (
+                <article className={`session-row ${session.id === activeSessionId ? "active" : ""}`} key={session.id}>
+                  <button
+                    type="button"
+                    onClick={() => onOpenSession(session.id)}
+                    aria-label={`${t.openChatSession}: ${session.title}`}
+                  >
+                    <strong>{session.title}</strong>
+                    <span>
+                      {t.messageCount(session.message_count)} · {t.eventCount(session.event_count)}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="delete-session-button"
+                    onClick={() => onDeleteSession(session.id)}
+                    aria-label={`${t.deleteChatSession}: ${session.title}`}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </article>
+              ))
+            )}
+          </div>
+        </section>
+      ) : (
+        <section className="activity-panel" aria-label={t.eventHistory}>
+          <div className="event-list">
+            {eventGroups.length === 0 ? (
+              <p className="empty-event">{t.noEvents}</p>
+            ) : (
+              eventGroups.map((group) => (
+                <RoundEventGroup
+                  key={group.messageId}
+                  group={group}
+                  currentEventId={currentEventId}
+                  onOpen={() => onOpenRound(group.messageId)}
+                  t={t}
+                />
+              ))
+            )}
+          </div>
+        </section>
+      )}
+    </aside>
+  );
+}
+
+function ChatWorkspace({
+  messages,
+  isStreaming,
+  input,
+  showTutorial,
+  shouldShowStarters,
+  tutorialStep,
+  activeExample,
+  activeGuide,
+  showApiKeyPanel,
+  apiKeyConfigured,
+  apiKeyInput,
+  apiKeyMessage,
+  selectedSkillCount,
+  isListening,
+  voiceMessage,
+  bottomRef,
+  onInputChange,
+  onKeyDown,
+  onSubmit,
+  onTutorialBack,
+  onTutorialNext,
+  onTutorialDone,
+  onStartGuide,
+  onContinueGuide,
+  onResetGuide,
+  onToggleApiKeyPanel,
+  onApiKeyInputChange,
+  onSaveOpenAIKey,
+  onOpenSkills,
+  onToggleVoiceInput,
+  onViewImage,
+  onOpenEvents,
+  t,
+}: {
+  messages: Message[];
+  isStreaming: boolean;
+  input: string;
+  showTutorial: boolean;
+  shouldShowStarters: boolean;
+  tutorialStep: number;
+  activeExample: GuidedExample | null | undefined;
+  activeGuide: ActiveGuide | null;
+  showApiKeyPanel: boolean;
+  apiKeyConfigured: boolean;
+  apiKeyInput: string;
+  apiKeyMessage: string;
+  selectedSkillCount: number;
+  isListening: boolean;
+  voiceMessage: string;
+  bottomRef: React.RefObject<HTMLDivElement | null>;
+  onInputChange: (value: string) => void;
+  onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onTutorialBack: () => void;
+  onTutorialNext: () => void;
+  onTutorialDone: () => void;
+  onStartGuide: (example: GuidedExample) => void;
+  onContinueGuide: () => void;
+  onResetGuide: () => void;
+  onToggleApiKeyPanel: () => void;
+  onApiKeyInputChange: (value: string) => void;
+  onSaveOpenAIKey: () => void;
+  onOpenSkills: () => void;
+  onToggleVoiceInput: () => void;
+  onViewImage: (image: GeneratedImage) => void;
+  onOpenEvents: (messageId: string) => void;
+  t: typeof TRANSLATIONS.en;
+}) {
+  return (
+    <section className="chat-workspace" aria-label="Chat conversation">
+      <div className="message-list">
+        {messages.map((message) => (
+          <article key={message.id} className={`message ${message.role}`}>
+            <span className="role-label">{message.role}</span>
+            {visibleMessageContent(message, isStreaming) ? <p>{visibleMessageContent(message, isStreaming)}</p> : null}
+            {message.activities?.length ? (
+              <ActivityStrip message={message} onOpenEvents={() => onOpenEvents(message.id)} t={t} />
+            ) : null}
+            {message.images?.length ? (
+              <ImageArtifactGallery images={message.images} onViewImage={onViewImage} t={t} />
+            ) : null}
+          </article>
+        ))}
+        <div ref={bottomRef} />
+      </div>
+
+      {(showTutorial || shouldShowStarters) && (
+        <section className={`starter-area ${showTutorial ? "with-tutorial" : ""}`} aria-label="Getting started">
+          {showTutorial && (
+            <TutorialPanel
+              step={tutorialStep}
+              steps={TUTORIAL_STEPS}
+              t={t}
+              onBack={onTutorialBack}
+              onNext={onTutorialNext}
+              onDone={onTutorialDone}
+            />
+          )}
+
+          {shouldShowStarters && (
+            <PromptSuggestions
+              examples={GUIDED_EXAMPLES}
+              activeExample={activeExample}
+              activeGuide={activeGuide}
+              t={t}
+              onStart={onStartGuide}
+              onContinue={onContinueGuide}
+              onReset={onResetGuide}
+            />
+          )}
+        </section>
+      )}
+
+      <Composer
+        input={input}
+        showApiKeyPanel={showApiKeyPanel}
+        apiKeyConfigured={apiKeyConfigured}
+        apiKeyInput={apiKeyInput}
+        apiKeyMessage={apiKeyMessage}
+        selectedSkillCount={selectedSkillCount}
+        isStreaming={isStreaming}
+        isListening={isListening}
+        voiceMessage={voiceMessage}
+        onInputChange={onInputChange}
+        onKeyDown={onKeyDown}
+        onSubmit={onSubmit}
+        onToggleApiKeyPanel={onToggleApiKeyPanel}
+        onApiKeyInputChange={onApiKeyInputChange}
+        onSaveOpenAIKey={onSaveOpenAIKey}
+        onOpenSkills={onOpenSkills}
+        onToggleVoiceInput={onToggleVoiceInput}
+        t={t}
+      />
+    </section>
+  );
+}
+
+function ActivityStrip({
+  message,
+  onOpenEvents,
+  t,
+}: {
+  message: Message;
+  onOpenEvents: () => void;
+  t: typeof TRANSLATIONS.en;
+}) {
+  const visibleActivities = (message.activities ?? []).slice(-5);
+
+  return (
+    <section className="activity-strip" aria-label={t.liveActivity} data-complete={message.activitiesComplete}>
+      <div className="activity-strip-header">
+        <span>{message.activitiesComplete ? t.activityCompleted : t.liveActivity}</span>
+        <button type="button" onClick={onOpenEvents}>
+          {t.viewEvents}
+        </button>
+      </div>
+      {!message.activitiesComplete ? (
+        <div className="activity-strip-list">
+          {visibleActivities.map((activity) => (
+            <span key={activity.id}>
+              <Loader2 size={12} className="spin" />
+              {activity.label}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function ImageArtifactGallery({
+  images,
+  onViewImage,
+  t,
+}: {
+  images: GeneratedImage[];
+  onViewImage: (image: GeneratedImage) => void;
+  t: typeof TRANSLATIONS.en;
+}) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selectedImage = images.find((image) => image.id === selectedId) ?? images.find((image) => image.imageUrl) ?? images[0];
+
+  if (!selectedImage) {
+    return null;
+  }
+
+  return (
+    <section className="visual-gallery" aria-label={t.visualArtifacts}>
+      <div className="visual-gallery-header">
+        <div>
+          <span className="section-kicker">{t.visualArtifacts}</span>
+          <strong>{images.length} visualizations</strong>
+        </div>
+        <span>{selectedImage.agent || t.managerAgent}</span>
+      </div>
+
+      <article className="visual-gallery-stage" data-loading={selectedImage.status === "loading"}>
+        <button
+          type="button"
+          className="visual-gallery-preview"
+          onClick={() => selectedImage.imageUrl && onViewImage(selectedImage)}
+          disabled={!selectedImage.imageUrl}
+          aria-label={`${t.viewImage}: ${selectedImage.title}`}
+        >
+          {selectedImage.imageUrl ? (
+            <img src={selectedImage.previewUrl || selectedImage.imageUrl} alt={selectedImage.title} />
+          ) : (
+            <span className="image-skeleton" />
+          )}
+        </button>
+        <div className="visual-gallery-detail">
+          <strong>{selectedImage.title}</strong>
+          <span>{selectedImage.agent || t.managerAgent}</span>
+          <p>{selectedImage.status === "loading" ? t.imageGenerating : selectedImage.description}</p>
+          <div className="image-artifact-actions">
+            <button type="button" onClick={() => onViewImage(selectedImage)} disabled={!selectedImage.imageUrl}>
+              <ZoomIn size={13} />
+              {t.viewImage}
+            </button>
+            {selectedImage.imageUrl ? (
+              <a href={selectedImage.imageUrl} download={`${safeFileName(selectedImage.title)}.png`}>
+                <Download size={13} />
+                {t.downloadImage}
+              </a>
+            ) : null}
+            <button type="button" onClick={() => copyImageToClipboard(selectedImage)} disabled={!selectedImage.imageUrl}>
+              <Copy size={13} />
+              {t.copyImage}
+            </button>
+            {selectedImage.imageUrl ? (
+              <a href={selectedImage.imageUrl} target="_blank" rel="noreferrer">
+                <ExternalLink size={13} />
+                {t.openImage}
+              </a>
+            ) : null}
+          </div>
+        </div>
+      </article>
+
+      <div className="visual-gallery-thumbs" role="list" aria-label={t.visualArtifacts}>
+        {images.map((image, index) => (
+          <button
+            type="button"
+            className={`visual-thumb ${image.id === selectedImage.id ? "active" : ""}`}
+            key={image.id}
+            onClick={() => setSelectedId(image.id)}
+            role="listitem"
+            aria-pressed={image.id === selectedImage.id}
+          >
+            <span className="visual-thumb-image">
+              {image.imageUrl ? <img src={image.previewUrl || image.imageUrl} alt="" /> : <span className="image-skeleton" />}
+            </span>
+            <span className="visual-thumb-copy">
+              <strong>{image.title}</strong>
+              <small>{index + 1} / {images.length}</small>
+            </span>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function Composer({
+  input,
+  showApiKeyPanel,
+  apiKeyConfigured,
+  apiKeyInput,
+  apiKeyMessage,
+  selectedSkillCount,
+  isStreaming,
+  isListening,
+  voiceMessage,
+  onInputChange,
+  onKeyDown,
+  onSubmit,
+  onToggleApiKeyPanel,
+  onApiKeyInputChange,
+  onSaveOpenAIKey,
+  onOpenSkills,
+  onToggleVoiceInput,
+  t,
+}: {
+  input: string;
+  showApiKeyPanel: boolean;
+  apiKeyConfigured: boolean;
+  apiKeyInput: string;
+  apiKeyMessage: string;
+  selectedSkillCount: number;
+  isStreaming: boolean;
+  isListening: boolean;
+  voiceMessage: string;
+  onInputChange: (value: string) => void;
+  onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onToggleApiKeyPanel: () => void;
+  onApiKeyInputChange: (value: string) => void;
+  onSaveOpenAIKey: () => void;
+  onOpenSkills: () => void;
+  onToggleVoiceInput: () => void;
+  t: typeof TRANSLATIONS.en;
+}) {
+  return (
+    <form className="composer" onSubmit={onSubmit}>
+      <label className="sr-only" htmlFor="message">
+        {t.messageLabel}
+      </label>
+      <textarea
+        id="message"
+        value={input}
+        onChange={(event) => onInputChange(event.target.value)}
+        onKeyDown={onKeyDown}
+        placeholder={t.placeholder}
+        rows={1}
+      />
+      <div className={`api-key-panel ${showApiKeyPanel ? "open" : ""}`} aria-hidden={!showApiKeyPanel}>
+        <div>
+          <strong>{t.apiKeyTitle}</strong>
+          <small>{apiKeyConfigured ? t.apiKeyConfigured : t.apiKeyNeeded}</small>
+        </div>
+        <div className="api-key-controls">
+          <input
+            type="password"
+            value={apiKeyInput}
+            onChange={(event) => onApiKeyInputChange(event.target.value)}
+            placeholder={t.apiKeyPlaceholder}
+            autoComplete="off"
+          />
+          <button type="button" onClick={onSaveOpenAIKey}>
+            {t.saveKey}
+          </button>
+        </div>
+        {apiKeyMessage ? <p>{apiKeyMessage}</p> : null}
+      </div>
+      <div className="composer-toolbar" aria-label="Composer controls">
+        <div className="composer-tools">
+          <button
+            type="button"
+            className={`composer-icon-button compass-button ${showApiKeyPanel ? "open" : ""}`}
+            aria-label={t.openApiSettings}
+            aria-expanded={showApiKeyPanel}
+            onClick={onToggleApiKeyPanel}
+          >
+            <Compass size={18} />
+          </button>
+          <button type="button" className="composer-mode-pill" onClick={onOpenSkills}>
+            <ShieldCheck size={14} />
+            {t.requiredSkillsCount(selectedSkillCount)}
+            <ChevronDown size={14} />
+          </button>
+        </div>
+        <div className="composer-actions">
+          <span className="composer-model-pill">{t.managerAgent}</span>
+          <button
+            type="button"
+            className={`composer-icon-button ${isListening ? "listening" : ""}`}
+            aria-label={isListening ? t.stopVoiceInput : t.voiceInput}
+            title={isListening ? t.stopVoiceInput : t.voiceInput}
+            onClick={onToggleVoiceInput}
+          >
+            <Mic size={16} />
+          </button>
+          <button
+            type="submit"
+            className="composer-send-button"
+            disabled={isStreaming || !input.trim()}
+            aria-label={t.sendMessage}
+          >
+            <Send size={17} />
+            <span>{t.send}</span>
+          </button>
+        </div>
+      </div>
+      {voiceMessage ? <p className="composer-notice">{voiceMessage}</p> : null}
+    </form>
+  );
+}
+
+function SkillDrawer({
   skills,
   selectedSkillIds,
   editingSkillId,
@@ -1227,6 +2058,7 @@ function SkillWorkbench({
   onDeleteSkill,
   onNewSkill,
   onPageChange,
+  onClose,
   t,
 }: {
   skills: Skill[];
@@ -1239,6 +2071,7 @@ function SkillWorkbench({
   onDeleteSkill: (id: string) => void;
   onNewSkill: () => void;
   onPageChange: (page: number) => void;
+  onClose: () => void;
   t: typeof TRANSLATIONS.en;
 }) {
   const pageCount = Math.max(1, Math.ceil(skills.length / SKILLS_PAGE_SIZE));
@@ -1252,8 +2085,12 @@ function SkillWorkbench({
           <span className="section-kicker">{t.requiredSkills}</span>
           <strong>{t.requiredSummary(selectedSkillIds.length)}</strong>
         </div>
-        <button type="button" onClick={onNewSkill}>
+        <button type="button" className="new-skill-button" onClick={onNewSkill}>
+          <Plus size={14} aria-hidden="true" />
           {t.newSkill}
+        </button>
+        <button type="button" className="skill-drawer-close" onClick={onClose} aria-label={t.close}>
+          <X size={16} />
         </button>
       </div>
 
@@ -1278,11 +2115,11 @@ function SkillWorkbench({
                 </span>
               </label>
               <div className="skill-actions">
-                <button type="button" onClick={() => onEditSkill(skill)}>
-                  {t.edit}
+                <button type="button" onClick={() => onEditSkill(skill)} aria-label={`${t.edit}: ${skill.name}`}>
+                  <Pencil size={14} />
                 </button>
-                <button type="button" onClick={() => onDeleteSkill(skill.id)}>
-                  {t.delete}
+                <button type="button" onClick={() => onDeleteSkill(skill.id)} aria-label={`${t.delete}: ${skill.name}`}>
+                  <Trash2 size={14} />
                 </button>
               </div>
             </article>
@@ -1427,7 +2264,7 @@ function TutorialPanel({
   );
 }
 
-function GuidedStarter({
+function PromptSuggestions({
   examples,
   activeExample,
   activeGuide,
@@ -1542,33 +2379,148 @@ interface EventGroup {
 
 function RoundEventGroup({
   group,
-  collapsed,
-  onToggle,
+  onOpen,
   currentEventId,
+  t,
 }: {
   group: EventGroup;
-  collapsed: boolean;
-  onToggle: () => void;
+  onOpen: () => void;
   currentEventId?: string;
+  t: typeof TRANSLATIONS.en;
+}) {
+  const latestEvent = group.events[group.events.length - 1];
+  const hasCurrentEvent = currentEventId ? group.events.some((event) => event.id === currentEventId) : false;
+
+  return (
+    <button
+      className={`round-log-button ${hasCurrentEvent ? "active" : ""}`}
+      type="button"
+      onClick={onOpen}
+      aria-label={`${t.openRoundLogs}: ${group.label}`}
+    >
+      <span className="round-log-title">
+        <ChevronDown size={14} />
+        <strong>{group.label}</strong>
+        <em>{group.events.length}</em>
+      </span>
+      <span className="round-log-preview">
+        <small>{t.latestEvent}</small>
+        {latestEvent ? latestEvent.title : ""}
+      </span>
+    </button>
+  );
+}
+
+function RoundLogModal({
+  group,
+  currentEventId,
+  onClose,
+  t,
+}: {
+  group: EventGroup;
+  currentEventId?: string;
+  onClose: () => void;
+  t: typeof TRANSLATIONS.en;
 }) {
   return (
-    <section className="event-round-group">
-      <button
-        className="round-expander"
-        type="button"
-        onClick={onToggle}
-        aria-expanded={!collapsed}
-        aria-label={`${collapsed ? "Expand" : "Collapse"} ${group.label} events`}
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="round-log-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="round-log-title"
+        onMouseDown={(event) => event.stopPropagation()}
       >
-        <ChevronDown className={collapsed ? "collapsed" : ""} size={14} />
-        <span>{group.label}</span>
-        <strong>{group.events.length}</strong>
-      </button>
-      {!collapsed &&
-        group.events.map((event) => (
-          <EventCard key={event.id} event={event} prominent={event.id === currentEventId} />
-        ))}
-    </section>
+        <div className="skill-modal-header">
+          <div>
+            <span className="section-kicker">{t.roundLogs}</span>
+            <h2 id="round-log-title">{group.label}</h2>
+          </div>
+          <button type="button" className="modal-close-button" onClick={onClose} aria-label={t.close}>
+            <X size={18} />
+          </button>
+        </div>
+        <div className="round-log-summary">
+          <span>{group.events.length}</span>
+          <strong>{t.eventHistory}</strong>
+        </div>
+        <div className="round-log-list">
+          {group.events.map((event) => (
+            <EventCard
+              key={event.id}
+              event={event}
+              roundLabel={group.label}
+              prominent={event.id === currentEventId}
+            />
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ImageLightbox({
+  image,
+  zoomMode,
+  onZoomModeChange,
+  onClose,
+  t,
+}: {
+  image: GeneratedImage;
+  zoomMode: ImageZoomMode;
+  onZoomModeChange: (mode: ImageZoomMode) => void;
+  onClose: () => void;
+  t: typeof TRANSLATIONS.en;
+}) {
+  if (!image.imageUrl) {
+    return null;
+  }
+
+  return (
+    <div className="modal-backdrop image-lightbox-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="image-lightbox"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="image-lightbox-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="image-lightbox-header">
+          <div>
+            <span className="section-kicker">{t.imageLightboxTitle}</span>
+            <h2 id="image-lightbox-title">{image.title}</h2>
+            <p>{image.agent || t.managerAgent}</p>
+          </div>
+          <div className="image-lightbox-actions">
+            <button
+              type="button"
+              className={zoomMode === "fit" ? "active" : ""}
+              onClick={() => onZoomModeChange("fit")}
+            >
+              {t.zoomFit}
+            </button>
+            <button
+              type="button"
+              className={zoomMode === "actual" ? "active" : ""}
+              onClick={() => onZoomModeChange("actual")}
+            >
+              {t.zoomActual}
+            </button>
+            <a href={image.imageUrl} download={`${safeFileName(image.title)}.png`}>
+              <Download size={14} />
+              {t.downloadImage}
+            </a>
+            <button type="button" className="modal-close-button" onClick={onClose} aria-label={t.close}>
+              <X size={18} />
+            </button>
+          </div>
+        </div>
+        <div className="image-lightbox-canvas" data-zoom={zoomMode}>
+          <img src={image.imageUrl} alt={image.title} />
+        </div>
+        {image.description ? <p className="image-lightbox-description">{image.description}</p> : null}
+      </section>
+    </div>
   );
 }
 
@@ -1601,6 +2553,104 @@ function groupedEvents(events: StreamEvent[], messages: Message[]): EventGroup[]
 
 function allEvents(currentEvent: StreamEvent | null, eventHistory: StreamEvent[]): StreamEvent[] {
   return currentEvent ? [...eventHistory, currentEvent] : eventHistory;
+}
+
+function sanitizeMessages(value: unknown, locale: Locale): Message[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    return initialMessages(locale);
+  }
+  const messages = value
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const candidate = item as Partial<Message>;
+      const role = candidate.role === "user" || candidate.role === "assistant" ? candidate.role : null;
+      if (!role) {
+        return null;
+      }
+      const message: Message = {
+        id: typeof candidate.id === "string" ? candidate.id : crypto.randomUUID(),
+        role,
+        content: typeof candidate.content === "string" ? candidate.content : "",
+      };
+      if (Array.isArray(candidate.images)) {
+        message.images = candidate.images
+          .filter((image) => Boolean(image && typeof image === "object"))
+          .map((image) => ({
+            id: typeof image.id === "string" ? image.id : crypto.randomUUID(),
+            title: typeof image.title === "string" ? image.title : "Financial visual summary",
+            description: typeof image.description === "string" ? image.description : "",
+            imageUrl: typeof image.imageUrl === "string" ? image.imageUrl : undefined,
+            previewUrl: typeof image.previewUrl === "string" ? image.previewUrl : undefined,
+            agent: typeof image.agent === "string" ? image.agent : undefined,
+            skillId: typeof image.skillId === "string" ? image.skillId : undefined,
+            traceId: typeof image.traceId === "string" ? image.traceId : undefined,
+            traceUrl: typeof image.traceUrl === "string" ? image.traceUrl : undefined,
+            createdAt: typeof image.createdAt === "string" ? image.createdAt : undefined,
+            status: image.status === "loading" ? "loading" : "ready",
+          }));
+      }
+      if (Array.isArray(candidate.activities)) {
+        message.activities = candidate.activities
+          .filter((activity) => Boolean(activity && typeof activity === "object"))
+          .map((activity) => ({
+            id: typeof activity.id === "string" ? activity.id : crypto.randomUUID(),
+            type: typeof activity.type === "string" ? activity.type : "event",
+            label: typeof activity.label === "string" ? activity.label : "",
+            createdAt: typeof activity.createdAt === "string" ? activity.createdAt : new Date().toISOString(),
+          }))
+          .filter((activity) => activity.label);
+      }
+      if (typeof candidate.activitiesComplete === "boolean") {
+        message.activitiesComplete = candidate.activitiesComplete;
+      }
+      return message;
+    })
+    .filter((message): message is Message => Boolean(message));
+  return messages.length > 0 ? messages : initialMessages(locale);
+}
+
+function sanitizeEvents(value: unknown): StreamEvent[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item, index) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const candidate = item as Partial<StreamEvent>;
+      if (
+        typeof candidate.messageId !== "string" ||
+        typeof candidate.type !== "string" ||
+        typeof candidate.title !== "string"
+      ) {
+        return null;
+      }
+      return {
+        id: typeof candidate.id === "string" ? candidate.id : crypto.randomUUID(),
+        messageId: candidate.messageId,
+        type: candidate.type,
+        title: candidate.title,
+        detail: typeof candidate.detail === "string" ? candidate.detail : "",
+        order: typeof candidate.order === "number" ? candidate.order : index,
+      } satisfies StreamEvent;
+    })
+    .filter((event): event is StreamEvent => Boolean(event));
+}
+
+function nextEventOrder(events: StreamEvent[]): number {
+  return events.reduce((max, event) => Math.max(max, event.order), -1) + 1;
+}
+
+function sessionTitle(messages: Message[], fallback: string): string {
+  const firstUserMessage = messages.find((message) => message.role === "user" && message.content.trim());
+  if (!firstUserMessage) {
+    return fallback;
+  }
+  const compact = firstUserMessage.content.replace(/\s+/g, " ").trim();
+  return compact.length > 72 ? `${compact.slice(0, 72)}...` : compact;
 }
 
 function roundIndex(messageId: string, messages: Message[]): number {
@@ -1669,6 +2719,53 @@ function financialContext(messages: Message[]): string {
     .join("\n\n");
 }
 
+function visibleMessageContent(message: Message, isStreaming: boolean): string {
+  const content = message.content.trim();
+  if (
+    message.role === "assistant" &&
+    message.images?.length &&
+    content === "No specialist produced a usable result."
+  ) {
+    return "";
+  }
+  return message.content || (message.role === "assistant" && isStreaming ? "..." : "");
+}
+
+function activityLabel(type: string, payload: Record<string, unknown>, t: typeof TRANSLATIONS.en): string {
+  const agent = String(payload.agent ?? "");
+  if (type === "trace_started") {
+    return t.activityTraceReady;
+  }
+  if (type === "manager_planning_started") {
+    return t.activityPlanning;
+  }
+  if (type === "execution_plan_created") {
+    return t.activityPlanReady;
+  }
+  if (type === "manager_started") {
+    return t.activityManagerStarted;
+  }
+  if (type === "manager_completed") {
+    return t.activitySynthesizing;
+  }
+  if (type === "no_relevant_skills") {
+    return t.activityNoSkills;
+  }
+  if (type === "image_generation_started" || agent === "FinancialVisualizationAgent") {
+    return t.activityGeneratingVisualization;
+  }
+  if (type === "skill_selected_by_manager") {
+    return t.activitySelectedSkill(String(payload.skill_name ?? payload.skill_id ?? "skill"));
+  }
+  if (type === "specialist_started" || type === "agent_started") {
+    return t.activityRunningAgent(agent || "agent");
+  }
+  if (type === "specialist_completed" || type === "agent_completed") {
+    return t.activityFinishedAgent(agent || "agent");
+  }
+  return "";
+}
+
 function safeFileName(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/gi, "-").replace(/^-+|-+$/g, "") || "financial-visualization";
 }
@@ -1685,6 +2782,50 @@ function imageUrlFromPayload(value: unknown): string | undefined {
     }
   }
   return undefined;
+}
+
+async function copyImageToClipboard(image: GeneratedImage) {
+  if (!image.imageUrl || !navigator.clipboard) {
+    return;
+  }
+  try {
+    if ("ClipboardItem" in window) {
+      const response = await fetch(image.imageUrl);
+      const blob = await response.blob();
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type || "image/png"]: blob })]);
+      return;
+    }
+  } catch {
+    // Fall back to copying the image URL/data URL below.
+  }
+  await navigator.clipboard.writeText(image.imageUrl);
+}
+
+async function createImagePreview(imageUrl: string): Promise<string | undefined> {
+  try {
+    const image = new Image();
+    image.decoding = "async";
+    image.src = imageUrl;
+    await image.decode();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 640;
+    canvas.height = 480;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return undefined;
+    }
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    const scale = Math.min(canvas.width / image.naturalWidth, canvas.height / image.naturalHeight);
+    const width = Math.round(image.naturalWidth * scale);
+    const height = Math.round(image.naturalHeight * scale);
+    const x = Math.round((canvas.width - width) / 2);
+    const y = Math.round((canvas.height - height) / 2);
+    context.drawImage(image, x, y, width, height);
+    return canvas.toDataURL("image/png");
+  } catch {
+    return undefined;
+  }
 }
 
 async function readNdjsonStream(stream: ReadableStream<Uint8Array>, onPayload: (payload: Record<string, unknown>) => void) {

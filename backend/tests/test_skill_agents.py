@@ -1,10 +1,12 @@
 import unittest
+import os
+from unittest.mock import patch
 
 from pydantic import ValidationError
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
-from skill_agents.models import Base, Skill
+from skill_agents.models import Base, ChatSession, Skill
 from skill_agents.orchestrator import MAX_EXECUTED_SKILLS, _required_only_plan
 from skill_agents.schemas import AgenticTaskRequest
 from skill_agents.seeds import DEFAULT_SKILLS, seed_default_skills
@@ -36,6 +38,41 @@ class SkillAgentPersistenceTests(unittest.TestCase):
             active = list(session.scalars(select(Skill).where(Skill.is_active.is_(True))))
 
         self.assertEqual(len(active), len(DEFAULT_SKILLS) - 1)
+
+
+class ChatSessionPersistenceTests(unittest.TestCase):
+    def setUp(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+        self.Session = sessionmaker(bind=engine)
+
+    def test_chat_session_json_round_trip(self):
+        with self.Session() as session:
+            chat_session = ChatSession(
+                title="2330 analysis",
+                messages_json=[{"id": "m1", "role": "user", "content": "分析 2330"}],
+                events_json=[{"id": "e1", "messageId": "m2", "type": "tool_called"}],
+            )
+            session.add(chat_session)
+            session.commit()
+
+            loaded = session.get(ChatSession, chat_session.id)
+
+        self.assertEqual(loaded.title, "2330 analysis")
+        self.assertEqual(loaded.messages_json[0]["content"], "分析 2330")
+        self.assertEqual(loaded.events_json[0]["messageId"], "m2")
+
+    def test_chat_session_soft_delete_flag(self):
+        with self.Session() as session:
+            chat_session = ChatSession(title="delete me", messages_json=[], events_json=[])
+            session.add(chat_session)
+            session.commit()
+
+            chat_session.is_active = False
+            session.commit()
+            active = list(session.scalars(select(ChatSession).where(ChatSession.is_active.is_(True))))
+
+        self.assertEqual(active, [])
 
 
 class AgenticTaskSchemaTests(unittest.TestCase):
@@ -72,6 +109,20 @@ class SkillPlanningTests(unittest.TestCase):
 
         self.assertEqual(len(plan.planned_skills), MAX_EXECUTED_SKILLS)
         self.assertTrue(all(planned.source == "required" for planned in plan.planned_skills))
+
+
+class SkillAgentImageModelTests(unittest.TestCase):
+    def test_default_image_model_is_gpt_image_2(self):
+        from skill_agents.orchestrator import image_model
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(image_model(), "gpt-image-2")
+
+    def test_image_model_override_is_preserved(self):
+        from skill_agents.orchestrator import image_model
+
+        with patch.dict(os.environ, {"OPENAI_IMAGE_MODEL": "custom-image-model"}):
+            self.assertEqual(image_model(), "custom-image-model")
 
 
 if __name__ == "__main__":

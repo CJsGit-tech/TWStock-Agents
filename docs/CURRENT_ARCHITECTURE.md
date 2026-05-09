@@ -14,6 +14,14 @@ The frontend streams assistant text into the chat bubble while showing reasoning
 
 ## Key Architecture Decisions
 
+### OpenAI Agents SDK + MCP Event Serialization
+
+Agents SDK stream event objects are live runtime objects. Do not deep-copy or call `dataclasses.asdict(...)` on them; nested agent/MCP references can include asyncio primitives such as `_asyncio.Future`, which are not pickle/deepcopy safe. Event serializers must use shallow dataclass traversal and stringify unknown runtime objects.
+
+MCP-backed Agents SDK runs keep hosted tracing enabled by default and use top-level `trace(...)` wrappers so workflows appear in the OpenAI Platform Traces dashboard. Set `OPENAI_AGENTS_DISABLE_TRACING=1` or `OPENAI_AGENTS_TRACING_ENABLED=false` only when traces should be intentionally disabled.
+
+See [OpenAI Agents SDK + MCP Notes](./OPENAI_AGENTS_SDK_MCP_NOTES.md) before adding new MCP-backed agent runs.
+
 ### MCP Servers: Python FastMCP
 
 - Same language family as `chat-api`.
@@ -255,7 +263,9 @@ sequenceDiagram
 - `manager_completed`: the manager synthesis completed.
 - `specialist_started`: a required or manager-selected skill agent started.
 - `specialist_completed`: a required or manager-selected skill agent completed.
-- `image_generated`: the visualization agent produced an image.
+- `image_generation_started`: the visualization agent or skill agent started producing an image artifact.
+- `image_generated`: the visualization agent or skill agent produced an image artifact.
+- `trace_started` / `trace_completed`: the backend created or completed an OpenAI Traces workflow and includes the trace id/dashboard URL.
 - `error`: shown in the event history panel. Stream-level fetch/parse failures are also appended to the assistant message.
 - `mcp_ready`: ignored by the frontend event panel.
 - `done`: ignored by the frontend event panel.
@@ -269,8 +279,8 @@ OPENAI_API_KEY="..."
 OPENAI_MODEL="gpt-5-mini"              # Default chat model
 FINANCIAL_ANALYSIS_MODEL="gpt-5-mini"  # Financial analyst model
 FINANCIAL_ANALYSIS_WEB_CONTEXT="medium"
-OPENAI_IMAGE_MODEL="gpt-image-1"       # Image generation model
-OPENAI_IMAGE_QUALITY="low"
+OPENAI_IMAGE_MODEL="gpt-image-2"       # Image generation model
+OPENAI_IMAGE_QUALITY="medium"
 ENABLE_FINANCIAL_IMAGE="true"          # Optional; defaults to true in code
 DATABASE_URL="postgresql+psycopg://twstock:twstock@postgres:5432/twstock_agents"
 SKILLS_DB_AUTO_INIT="true"

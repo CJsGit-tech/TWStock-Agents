@@ -1,7 +1,10 @@
 import json
+import logging
 import os
+import traceback
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
+from dataclasses import fields, is_dataclass
 from typing import Any, Literal
 
 from agents import Agent, ModelSettings, Runner
@@ -24,6 +27,10 @@ from sqlalchemy.orm import Session
 from financial_agents import FinancialAnalysisRequest, run_financial_analysis
 from skill_agents import (
     AgenticTaskRequest,
+    ChatSessionCreate,
+    ChatSessionRead,
+    ChatSessionSummary,
+    ChatSessionUpdate,
     SkillCreate,
     SkillDraftRequest,
     SkillDraftResponse,
@@ -33,9 +40,22 @@ from skill_agents import (
     run_agentic_task,
 )
 from skill_agents.db import get_session, initialize_database
-from skill_agents.models import Skill
+from skill_agents.models import ChatSession, Skill
+from agent_tracing import (
+    configure_tracing,
+    configure_tracing_api_key,
+    new_trace_id,
+    run_config,
+    trace_url,
+    workflow_trace,
+)
 
 load_dotenv()
+configure_tracing()
+if os.getenv("OPENAI_API_KEY"):
+    configure_tracing_api_key(os.environ["OPENAI_API_KEY"])
+
+logger = logging.getLogger(__name__)
 
 ARITHMETIC_MCP_SERVER_NAME = "arithmetic-mcp-fastmcp"
 TWSTOCK_MCP_SERVER_NAME = "twstock-mcp-fastmcp"
@@ -88,6 +108,7 @@ async def set_openai_key(payload: OpenAIKeyRequest) -> dict[str, bool]:
     if not api_key:
         raise HTTPException(status_code=400, detail="API key is required.")
     os.environ["OPENAI_API_KEY"] = api_key
+    configure_tracing_api_key(api_key)
     return {"configured": True}
 
 
@@ -183,15 +204,75 @@ async def delete_skill(skill_id: str, session: Session = Depends(get_session)) -
     session.commit()
 
 
+@app.get("/api/chat-sessions", response_model=list[ChatSessionSummary])
+async def list_chat_sessions(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    sessions = session.scalars(
+        select(ChatSession).where(ChatSession.is_active.is_(True)).order_by(ChatSession.updated_at.desc())
+    )
+    return [chat_session_summary(chat_session) for chat_session in sessions]
+
+
+@app.post("/api/chat-sessions", response_model=ChatSessionRead, status_code=status.HTTP_201_CREATED)
+async def create_chat_session(payload: ChatSessionCreate, session: Session = Depends(get_session)) -> ChatSession:
+    chat_session = ChatSession(**payload.model_dump())
+    session.add(chat_session)
+    session.commit()
+    session.refresh(chat_session)
+    return chat_session
+
+
+@app.get("/api/chat-sessions/{chat_session_id}", response_model=ChatSessionRead)
+async def get_chat_session(chat_session_id: str, session: Session = Depends(get_session)) -> ChatSession:
+    chat_session = session.get(ChatSession, chat_session_id)
+    if not chat_session or not chat_session.is_active:
+        raise HTTPException(status_code=404, detail="Chat session not found.")
+    return chat_session
+
+
+@app.put("/api/chat-sessions/{chat_session_id}", response_model=ChatSessionRead)
+async def update_chat_session(
+    chat_session_id: str,
+    payload: ChatSessionUpdate,
+    session: Session = Depends(get_session),
+) -> ChatSession:
+    chat_session = session.get(ChatSession, chat_session_id)
+    if not chat_session or not chat_session.is_active:
+        raise HTTPException(status_code=404, detail="Chat session not found.")
+
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        setattr(chat_session, key, value)
+    session.commit()
+    session.refresh(chat_session)
+    return chat_session
+
+
+@app.delete("/api/chat-sessions/{chat_session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_chat_session(chat_session_id: str, session: Session = Depends(get_session)) -> None:
+    chat_session = session.get(ChatSession, chat_session_id)
+    if not chat_session or not chat_session.is_active:
+        raise HTTPException(status_code=404, detail="Chat session not found.")
+    chat_session.is_active = False
+    session.commit()
+
+
 @app.post("/api/skills/draft", response_model=SkillDraftResponse)
 async def draft_skill(payload: SkillDraftRequest) -> dict[str, str]:
     if not openai_api_key_configured():
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not set on the backend service.")
 
     try:
+        trace_id = new_trace_id()
+        metadata = {"endpoint": "/api/skills/draft", "workflow": "Skill prompt builder"}
         async with AsyncExitStack() as stack:
             mcp_servers = [await stack.enter_async_context(server) for server in build_mcp_servers()]
-            return await build_skill_draft(payload.prompt, mcp_servers, context=payload.context)
+            with workflow_trace("Skill prompt builder", trace_id=trace_id, metadata=metadata):
+                return await build_skill_draft(
+                    payload.prompt,
+                    mcp_servers,
+                    context=payload.context,
+                    trace_id=trace_id,
+                    trace_metadata=metadata,
+                )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -231,6 +312,20 @@ def build_mcp_servers() -> list[MCPServerStreamableHttp]:
     ]
 
 
+def development_errors_enabled() -> bool:
+    return os.getenv("APP_ENV", "development").lower() not in {"prod", "production"}
+
+
+def error_payload(exc: Exception) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "message": str(exc),
+        "error_type": exc.__class__.__name__,
+    }
+    if development_errors_enabled():
+        payload["traceback"] = traceback.format_exc()
+    return payload
+
+
 def openai_api_key_configured() -> bool:
     return bool(os.getenv("OPENAI_API_KEY"))
 
@@ -245,6 +340,17 @@ def load_agentic_skills(session: Session, skill_ids: list[str]) -> tuple[list[Sk
     return [by_id[skill_id] for skill_id in unique_ids], active_skills
 
 
+def chat_session_summary(chat_session: ChatSession) -> dict[str, Any]:
+    return {
+        "id": chat_session.id,
+        "title": chat_session.title,
+        "message_count": len(chat_session.messages_json or []),
+        "event_count": len(chat_session.events_json or []),
+        "created_at": chat_session.created_at,
+        "updated_at": chat_session.updated_at,
+    }
+
+
 async def stream_agent_events(messages: list[ChatMessage]) -> AsyncIterator[str]:
     if not openai_api_key_configured():
         yield encode_event(
@@ -255,52 +361,69 @@ async def stream_agent_events(messages: list[ChatMessage]) -> AsyncIterator[str]
         )
         return
 
+    trace_id = new_trace_id()
+    trace_metadata = {"endpoint": "/api/chat/stream", "workflow": "MCP chat"}
+    yield encode_event(
+        "trace_started",
+        {"trace_id": trace_id, "trace_url": trace_url(trace_id), "workflow": "MCP chat"},
+    )
+
     try:
-        async with AsyncExitStack() as stack:
-            mcp_servers = [await stack.enter_async_context(server) for server in build_mcp_servers()]
-            for server in mcp_servers:
-                tools = await server.list_tools()
-                yield encode_event(
-                    "mcp_ready",
-                    {
-                        "server": server.name,
-                        "tools": [tool.name for tool in tools],
-                    },
+        with workflow_trace("MCP chat", trace_id=trace_id, metadata=trace_metadata):
+            async with AsyncExitStack() as stack:
+                mcp_servers = [await stack.enter_async_context(server) for server in build_mcp_servers()]
+                for server in mcp_servers:
+                    tools = await server.list_tools()
+                    yield encode_event(
+                        "mcp_ready",
+                        {
+                            "server": server.name,
+                            "tools": [tool.name for tool in tools],
+                        },
+                    )
+
+                chat_model = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+                chat_settings = (
+                    ModelSettings(reasoning={"effort": "low"})
+                    if chat_model.startswith(("gpt-5", "o3", "o4"))
+                    else ModelSettings()
                 )
 
-            chat_model = os.getenv("OPENAI_MODEL", "gpt-5-mini")
-            chat_settings = (
-                ModelSettings(reasoning={"effort": "low"})
-                if chat_model.startswith(("gpt-5", "o3", "o4"))
-                else ModelSettings()
-            )
+                agent = Agent(
+                    name="MCP Chat Agent",
+                    instructions=(
+                        "You are a concise assistant with MCP tools. Use the arithmetic MCP tools "
+                        "for addition, subtraction, multiplication, and division. Use the twstock "
+                        "MCP tools for Taiwan stock metadata, realtime quotes, historical OHLC data, "
+                        "moving averages, and Best Four Point technical signals. Explain tool-derived "
+                        "results briefly and mention when market data may be unavailable, delayed, or "
+                        "rate limited. The chat history is provided as numbered rounds. For cumulative "
+                        "questions like 'what do the current calculations add up to', use each prior "
+                        "round's final answer as the remembered value. Do not add intermediate values "
+                        "from prior explanations unless the user explicitly asks for intermediate values."
+                    ),
+                    model=chat_model,
+                    model_settings=chat_settings,
+                    mcp_servers=mcp_servers,
+                )
 
-            agent = Agent(
-                name="MCP Chat Agent",
-                instructions=(
-                    "You are a concise assistant with MCP tools. Use the arithmetic MCP tools "
-                    "for addition, subtraction, multiplication, and division. Use the twstock "
-                    "MCP tools for Taiwan stock metadata, realtime quotes, historical OHLC data, "
-                    "moving averages, and Best Four Point technical signals. Explain tool-derived "
-                    "results briefly and mention when market data may be unavailable, delayed, or "
-                    "rate limited. The chat history is provided as numbered rounds. For cumulative "
-                    "questions like 'what do the current calculations add up to', use each prior "
-                    "round's final answer as the remembered value. Do not add intermediate values "
-                    "from prior explanations unless the user explicitly asks for intermediate values."
-                ),
-                model=chat_model,
-                model_settings=chat_settings,
-                mcp_servers=mcp_servers,
-            )
+                result = Runner.run_streamed(
+                    agent,
+                    input=conversation_prompt(messages),
+                    run_config=run_config("MCP chat", trace_id=trace_id, metadata=trace_metadata),
+                )
+                async for event in result.stream_events():
+                    async for normalized in normalize_agent_event(event):
+                        yield encode_event(normalized["type"], normalized["payload"])
 
-            result = Runner.run_streamed(agent, input=conversation_prompt(messages))
-            async for event in result.stream_events():
-                async for normalized in normalize_agent_event(event):
-                    yield encode_event(normalized["type"], normalized["payload"])
-
-            yield encode_event("done", {})
+                yield encode_event(
+                    "trace_completed",
+                    {"trace_id": trace_id, "trace_url": trace_url(trace_id), "workflow": "MCP chat"},
+                )
+                yield encode_event("done", {})
     except Exception as exc:
-        yield encode_event("error", {"message": str(exc)})
+        logger.exception("Chat stream failed")
+        yield encode_event("error", error_payload(exc))
 
 
 async def stream_financial_analysis_events(
@@ -317,25 +440,50 @@ async def stream_financial_analysis_events(
         )
         return
 
+    trace_id = new_trace_id()
+    trace_metadata = {"endpoint": "/api/financial-analysis/stream", "workflow": "Financial analysis", "stock": stock}
+    yield encode_event(
+        "trace_started",
+        {"trace_id": trace_id, "trace_url": trace_url(trace_id), "workflow": "Financial analysis"},
+    )
+
     try:
-        async with AsyncExitStack() as stack:
-            mcp_servers = [await stack.enter_async_context(server) for server in build_mcp_servers()]
-            for server in mcp_servers:
-                tools = await server.list_tools()
+        with workflow_trace(
+            "Financial analysis",
+            trace_id=trace_id,
+            group_id=stock,
+            metadata=trace_metadata,
+        ):
+            async with AsyncExitStack() as stack:
+                mcp_servers = [await stack.enter_async_context(server) for server in build_mcp_servers()]
+                for server in mcp_servers:
+                    tools = await server.list_tools()
+                    yield encode_event(
+                        "mcp_ready",
+                        {
+                            "server": server.name,
+                            "tools": [tool.name for tool in tools],
+                        },
+                    )
+
+                async for event in run_financial_analysis(
+                    stock,
+                    mcp_servers,
+                    question=question,
+                    context=context,
+                    trace_id=trace_id,
+                    trace_metadata=trace_metadata,
+                ):
+                    yield encode_event(event["type"], event["payload"])
+
                 yield encode_event(
-                    "mcp_ready",
-                    {
-                        "server": server.name,
-                        "tools": [tool.name for tool in tools],
-                    },
+                    "trace_completed",
+                    {"trace_id": trace_id, "trace_url": trace_url(trace_id), "workflow": "Financial analysis"},
                 )
-
-            async for event in run_financial_analysis(stock, mcp_servers, question=question, context=context):
-                yield encode_event(event["type"], event["payload"])
-
-            yield encode_event("done", {})
+                yield encode_event("done", {})
     except Exception as exc:
-        yield encode_event("error", {"message": str(exc)})
+        logger.exception("Financial analysis stream failed")
+        yield encode_event("error", error_payload(exc))
 
 
 async def stream_agentic_task_events(
@@ -352,32 +500,58 @@ async def stream_agentic_task_events(
         )
         return
 
+    trace_id = new_trace_id()
+    trace_metadata = {
+        "endpoint": "/api/agentic-task/stream",
+        "workflow": "Agentic task",
+        "stock": request.stock,
+        "required_skill_count": len(required_skills),
+        "active_skill_count": len(active_skills),
+    }
+    yield encode_event(
+        "trace_started",
+        {"trace_id": trace_id, "trace_url": trace_url(trace_id), "workflow": "Agentic task"},
+    )
+
     try:
-        async with AsyncExitStack() as stack:
-            mcp_servers = [await stack.enter_async_context(server) for server in build_mcp_servers()]
-            for server in mcp_servers:
-                tools = await server.list_tools()
+        with workflow_trace(
+            "Agentic task",
+            trace_id=trace_id,
+            group_id=request.stock,
+            metadata=trace_metadata,
+        ):
+            async with AsyncExitStack() as stack:
+                mcp_servers = [await stack.enter_async_context(server) for server in build_mcp_servers()]
+                for server in mcp_servers:
+                    tools = await server.list_tools()
+                    yield encode_event(
+                        "mcp_ready",
+                        {
+                            "server": server.name,
+                            "tools": [tool.name for tool in tools],
+                        },
+                    )
+
+                async for event in run_agentic_task(
+                    request.prompt,
+                    required_skills,
+                    active_skills,
+                    mcp_servers,
+                    stock=request.stock,
+                    context=request.context,
+                    trace_id=trace_id,
+                    trace_metadata=trace_metadata,
+                ):
+                    yield encode_event(event["type"], event["payload"])
+
                 yield encode_event(
-                    "mcp_ready",
-                    {
-                        "server": server.name,
-                        "tools": [tool.name for tool in tools],
-                    },
+                    "trace_completed",
+                    {"trace_id": trace_id, "trace_url": trace_url(trace_id), "workflow": "Agentic task"},
                 )
-
-            async for event in run_agentic_task(
-                request.prompt,
-                required_skills,
-                active_skills,
-                mcp_servers,
-                stock=request.stock,
-                context=request.context,
-            ):
-                yield encode_event(event["type"], event["payload"])
-
-            yield encode_event("done", {})
+                yield encode_event("done", {})
     except Exception as exc:
-        yield encode_event("error", {"message": str(exc)})
+        logger.exception("Agentic task stream failed")
+        yield encode_event("error", error_payload(exc))
 
 
 async def normalize_agent_event(event: Any) -> AsyncIterator[dict[str, Any]]:
@@ -473,7 +647,12 @@ def encode_event(event_type: str, payload: dict[str, Any]) -> str:
 
 def to_jsonable(value: Any) -> Any:
     if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json")
+        try:
+            return value.model_dump(mode="json")
+        except Exception:
+            return str(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return {field.name: to_jsonable(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, dict):
         return {str(key): to_jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):

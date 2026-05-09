@@ -55,6 +55,7 @@ The backend emits one JSON object per line:
 - `manager_completed`: the final manager synthesis completed.
 - `specialist_started`: a required or manager-selected skill agent started.
 - `specialist_completed`: a required or manager-selected skill agent completed.
+- `image_generation_started`: the visualization agent started a visual artifact.
 - `image_generated`: the visualization agent generated a chart image.
 - `done`: stream finished.
 - `error`: backend or upstream error.

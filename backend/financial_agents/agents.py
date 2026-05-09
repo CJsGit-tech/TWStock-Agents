@@ -32,7 +32,7 @@ def web_search_tool() -> WebSearchTool:
 
 
 def image_model() -> str:
-    return os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
+    return os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
 
 
 def financial_analysis_agent(mcp_servers: list[MCPServer]) -> Agent:
@@ -84,7 +84,7 @@ def financial_visualization_agent() -> Agent:
                     "type": "image_generation",
                     "model": image_model(),
                     "size": "1024x1024",
-                    "quality": os.getenv("OPENAI_IMAGE_QUALITY", "low"),
+                    "quality": os.getenv("OPENAI_IMAGE_QUALITY", "medium"),
                 }
             )
         ],
