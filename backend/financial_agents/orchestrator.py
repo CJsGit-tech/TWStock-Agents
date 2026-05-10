@@ -24,7 +24,7 @@ from collections.abc import AsyncIterator
 from dataclasses import fields, is_dataclass
 from typing import Any
 
-from agents import Runner, agent_span
+from agents import Runner
 from agents.items import ToolCallItem, ToolCallOutputItem
 from agents.mcp import MCPServer
 from openai.types.responses import (
@@ -35,7 +35,7 @@ from openai.types.responses import (
 
 from .agents import financial_analysis_agent, financial_visualization_agent
 from .schemas import SpecialistResult, normalize_stock_input
-from agent_tracing import run_config, trace_url, tracing_disabled
+from agent_tracing import run_config, trace_url
 
 # ---------------------------------------------------------------------------
 # Visualization detection
@@ -68,18 +68,6 @@ async def run_financial_analysis(
     normalized_stock = normalize_stock_input(stock)
     effective_question = (question or stock).strip() or normalized_stock
 
-    # Decide whether this is a visualization request or an analysis request
-    if _is_visualization_request(effective_question):
-        async for event in _run_visualization(
-            normalized_stock,
-            effective_question,
-            context,
-            trace_id=trace_id,
-            trace_metadata=trace_metadata,
-        ):
-            yield event
-        return
-
     # --- Analysis flow: let the agent handle everything ---
     yield {
         "type": "agent_started",
@@ -100,20 +88,15 @@ async def run_financial_analysis(
         "stock": normalized_stock,
         "workflow": "Financial analysis",
     }
-    with agent_span(
-        "FinancialAnalysisAgent",
-        tools=["twstock MCP", "arithmetic MCP", "WebSearch"],
-        disabled=tracing_disabled(),
-    ):
-        result = Runner.run_streamed(
-            agent,
-            input=prompt,
-            max_turns=20,
-            run_config=run_config("Financial analysis", trace_id=trace_id, group_id=normalized_stock, metadata=metadata),
-        )
-        async for event in result.stream_events():
-            async for normalized in _normalize_agent_event(event):
-                yield normalized
+    result = Runner.run_streamed(
+        agent,
+        input=prompt,
+        max_turns=20,
+        run_config=run_config("Financial analysis", trace_id=trace_id, group_id=normalized_stock, metadata=metadata),
+    )
+    async for event in result.stream_events():
+        async for normalized in _normalize_agent_event(event):
+            yield normalized
 
     yield {
         "type": "agent_completed",
@@ -190,22 +173,17 @@ async def _run_visualization(
             "stock": stock,
             "workflow": "Financial visualization",
         }
-        with agent_span(
-            "FinancialVisualizationAgent",
-            tools=["ImageGenerationTool"],
-            disabled=tracing_disabled(),
-        ):
-            vis_result = await Runner.run(
-                financial_visualization_agent(),
-                prompt,
-                max_turns=6,
-                run_config=run_config(
-                    "Financial visualization",
-                    trace_id=trace_id,
-                    group_id=stock,
-                    metadata=metadata,
-                ),
-            )
+        vis_result = await Runner.run(
+            financial_visualization_agent(),
+            prompt,
+            max_turns=6,
+            run_config=run_config(
+                "Financial visualization",
+                trace_id=trace_id,
+                group_id=stock,
+                metadata=metadata,
+            ),
+        )
         images = _extract_image_payloads(vis_result)
         description = _stringify_output(vis_result.final_output)[:500]
 

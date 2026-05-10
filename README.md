@@ -34,7 +34,9 @@ The React chatbot stack adds:
 - Chat API: `http://localhost:8000/api/health`
 - Financial analysis stream: `POST http://localhost:8000/api/financial-analysis/stream`
 - Skill-backed agentic task stream: `POST http://localhost:8000/api/agentic-task/stream`
+- Button-triggered visualization stream: `POST http://localhost:8000/api/visualizations/stream`
 - Skill CRUD API: `GET/POST/PUT/DELETE http://localhost:8000/api/skills`
+- Chat session API: `GET/POST/PUT/DELETE http://localhost:8000/api/chat-sessions`
 
 ## Run With Docker Compose
 
@@ -47,10 +49,12 @@ FINANCIAL_ANALYSIS_MODEL="gpt-5-mini"
 FINANCIAL_ANALYSIS_WEB_CONTEXT="medium"
 OPENAI_IMAGE_MODEL="gpt-image-2"
 OPENAI_IMAGE_QUALITY="medium"
+OPENAI_AGENTS_TRACING_ENABLED="true"
+OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA="true"
 DATABASE_URL="postgresql+psycopg://twstock:twstock@postgres:5432/twstock_agents"
 ```
 
-Only `OPENAI_API_KEY` is required. The other variables are optional.
+Only `OPENAI_API_KEY` is required. The other variables are optional. Agents SDK tracing is enabled by default; set `OPENAI_AGENTS_TRACING_ENABLED=false` or `OPENAI_AGENTS_DISABLE_TRACING=1` only when you intentionally want to stop uploads to the OpenAI Traces dashboard.
 
 Start the full MCP chatbot stack:
 
@@ -81,11 +85,11 @@ Open the frontend at `http://localhost:5173`.
 
 The Compose stack starts five services:
 
-- `postgres`: Postgres database for user-created skills.
+- `postgres`: Postgres database for user-created skills and chat-session snapshots.
 - `arithmetic-mcp-fastmcp`: Python FastMCP arithmetic server.
 - `twstock-mcp-fastmcp`: Python FastMCP Taiwan stock server powered by `twstock`.
 - `chat-api`: Python FastAPI bridge using the OpenAI Agents SDK and the MCP server.
-- `chat-web`: React/Vite chatbot UI that streams reasoning, tool, and text events.
+- `chat-web`: React/Vite chatbot UI with chat sessions, session-grouped event logs, required skills, and image galleries.
 
 ## Skill-Backed Agentic Tasks
 
@@ -100,14 +104,15 @@ curl -N http://localhost:8000/api/agentic-task/stream \
 The workflow:
 
 - Loads all active skills from Postgres.
-- Treats user-selected skills as required skills.
-- Lets a Manager Planner add relevant optional skills up to five total executed skills.
-- Gives every planner, specialist, manager, fallback, and skill-draft agent all available MCP servers plus WebSearch and ImageGeneration.
+- If the user selected skills, treats them as the exact required execution set and runs only those skills, up to five total executed skills.
+- If the user selected no skills, lets a Manager Planner choose relevant skills from all active skills, up to five total executed skills.
+- Gives planner, specialist, manager, fallback, and skill-draft agents all available MCP servers plus WebSearch.
 - Runs specialists in parallel.
+- Creates a separate OpenAI trace for each `SpecialistSkillAgent-{skill name}` run, linked to the parent `Agentic task` trace through trace metadata.
 - Uses a Manager Agent to synthesize one final Markdown answer.
 - Falls back to direct manager research when no relevant skills exist, and suggests creating a reusable skill.
 
-The stream emits `trace_started`, `manager_planning_started`, `execution_plan_created`, `skill_selected_by_manager`, `skill_skipped_by_manager`, `no_relevant_skills`, `manager_started`, `specialist_started`, `tool_called`, `tool_output`, `specialist_completed`, `image_generation_started`, `image_generated`, `text_delta`, `manager_completed`, `trace_completed`, `error`, and `done`.
+The stream emits `trace_started`, `manager_planning_started`, `execution_plan_created`, `skill_selected_by_manager`, `skill_skipped_by_manager`, `no_relevant_skills`, `manager_started`, `specialist_started`, `tool_called`, `tool_output`, `specialist_completed`, `text_delta`, `manager_completed`, `trace_completed`, `error`, and `done`.
 
 Skill drafts can be generated without saving:
 
@@ -135,9 +140,22 @@ The workflow:
 - Backend preserves the original question and optional recent chat context.
 - One analyst agent decides which MCP and WebSearch tools to call.
 - Backend streams the analyst agent response.
-- Runs `FinancialVisualizationAgent` with `ImageGenerationTool` when the user asks for a chart/image from numerical data already shown in recent chat history.
 
-The stream emits `trace_started`, `agent_started`, `agent_completed`, `reasoning_event`, `tool_called`, `tool_output`, `text_delta`, `image_generation_started`, `image_generated`, `trace_completed`, `error`, and `done`.
+The stream emits `trace_started`, `agent_started`, `agent_completed`, `reasoning_event`, `tool_called`, `tool_output`, `text_delta`, `trace_completed`, `error`, and `done`.
+
+## Button-Triggered Visualizations
+
+Normal analysis agents do not call `ImageGenerationTool`. After an agentic answer completes, the frontend can show a per-answer **Generate Images** button when that answer has saved required-skill metadata. The button calls a dedicated visualization stream:
+
+```sh
+curl -N http://localhost:8000/api/visualizations/stream \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"分析 2330 的估值","answer":"...final markdown...","required_skill_ids":["..."],"stock":"2330"}'
+```
+
+The backend loads those required skills and runs a dedicated `SkillVisualizationAgent-{skill name}` with `ImageGenerationTool`, producing exactly one image artifact per required skill. The visualization stream emits `trace_started`, `image_generation_started`, `image_generated`, `trace_completed`, `error`, and `done`.
+
+Chat sessions persist message JSON and event JSON snapshots. The frontend Activity Rail has Chat Sessions and Event Logs tabs; Event Logs are grouped by session, then by round. Deleting a round log removes only that round's events/activity metadata, not the chat messages.
 
 ## Run The MCP Server Directly
 

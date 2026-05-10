@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, fields, is_dataclass
 from typing import Any
 
-from agents import Agent, ImageGenerationTool, ModelSettings, Runner, WebSearchTool, agent_span
+from agents import Agent, ImageGenerationTool, ModelSettings, Runner, WebSearchTool
 from agents.items import ToolCallItem, ToolCallOutputItem
 from agents.mcp import MCPServer
 from openai.types.responses import (
@@ -17,9 +17,9 @@ from openai.types.responses import (
     ResponseTextDeltaEvent,
 )
 
-from financial_agents.orchestrator import _extract_image_payloads
+from financial_agents.orchestrator import _extract_image_payloads, _stringify_output
 from financial_agents.schemas import DISCLAIMER
-from agent_tracing import run_config, trace_url, tracing_disabled
+from agent_tracing import run_config, trace_url
 
 from .models import Skill
 
@@ -68,6 +68,11 @@ def _model_settings() -> ModelSettings:
 def _builtin_tools() -> list[Any]:
     return [
         WebSearchTool(search_context_size=os.getenv("FINANCIAL_ANALYSIS_WEB_CONTEXT", "medium")),  # type: ignore[arg-type]
+    ]
+
+
+def _image_tools() -> list[Any]:
+    return [
         ImageGenerationTool(
             tool_config={
                 "type": "image_generation",
@@ -165,6 +170,20 @@ def build_skill_prompt_builder_agent(mcp_servers: list[MCPServer]) -> Agent:
     )
 
 
+def build_skill_visualization_agent(skill: Skill) -> Agent:
+    return Agent(
+        name=f"SkillVisualizationAgent-{skill.name}",
+        instructions=(
+            "You generate one finance visualization image for the provided specialist skill. "
+            "Use only the provided answer/context as source material. Do not invent exact numbers. "
+            "The output should be a clear visual artifact suitable for an analyst report, with concise "
+            "labels and a professional dark finance style."
+        ),
+        model=agentic_model(),
+        tools=_image_tools(),
+    )
+
+
 async def run_agentic_task(
     prompt: str,
     required_skills: list[Skill],
@@ -174,65 +193,100 @@ async def run_agentic_task(
     context: str | None = None,
     trace_id: str | None = None,
     trace_metadata: dict[str, Any] | None = None,
+    session_id: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
+    """Run the agentic task workflow.
+
+    Three workflows, all sharing a single trace_id under the top-level
+    `workflow_trace("Agentic task")` created in app.py:
+
+    - WF1: user selected skills → run exactly those in parallel.
+    - WF2: no skills selected, no chat session → run ALL active skills in parallel.
+    - WF3: no skills selected, with chat session → ManagerPlannerAgent picks
+      relevant skills from active_skills, then runs them in parallel.
+
+    Each specialist streams its output under its skill section; the frontend
+    renders per-skill results. Image generation is a separate endpoint triggered
+    by the user from the UI.
+    """
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
     results: list[SpecialistResult] = []
 
-    yield {
-        "type": "manager_planning_started",
-        "payload": {
-            "agent": "ManagerPlannerAgent",
-            "required_skill_ids": [skill.id for skill in required_skills],
-            "candidate_count": len(active_skills),
-        },
-    }
-
-    try:
-        plan = await _plan_skill_execution(
-            prompt,
-            required_skills,
-            active_skills,
-            mcp_servers,
-            stock=stock,
-            context=context,
-            trace_id=trace_id,
-            trace_metadata=trace_metadata,
-        )
-    except Exception as exc:
+    # ── Decide which skills to run based on the three workflows ──────────
+    if required_skills:
+        # WF1: User selected skills explicitly — run only those.
         plan = _required_only_plan(required_skills)
+        workflow_label = "selected"
+    elif not session_id:
+        # WF2: No skills selected, no session — default to ALL active skills.
+        plan = SkillExecutionPlan(
+            planned_skills=[
+                PlannedSkill(skill=skill, source="default-all", reason="No skills selected; running all active skills.")
+                for skill in active_skills[:MAX_EXECUTED_SKILLS]
+            ],
+            skipped_skills=[],
+            no_relevant_skills=not active_skills,
+        )
+        workflow_label = "all-active"
+    else:
+        # WF3: No skills selected, with session — Manager Planner picks relevant ones.
         yield {
-            "type": "error",
+            "type": "manager_planning_started",
             "payload": {
                 "agent": "ManagerPlannerAgent",
-                "message": f"Planner failed; falling back to required skills only: {exc}",
+                "required_skill_ids": [],
+                "candidate_count": len(active_skills),
             },
         }
-
-    for planned in plan.planned_skills:
-        if planned.source == "manager":
+        try:
+            plan = await _plan_skill_execution(
+                prompt,
+                required_skills,
+                active_skills,
+                mcp_servers,
+                stock=stock,
+                context=context,
+                trace_id=trace_id,
+                trace_metadata=trace_metadata,
+            )
+        except Exception as exc:
+            plan = SkillExecutionPlan(planned_skills=[], skipped_skills=[], no_relevant_skills=True)
             yield {
-                "type": "skill_selected_by_manager",
+                "type": "error",
                 "payload": {
                     "agent": "ManagerPlannerAgent",
-                    "skill_id": planned.skill.id,
-                    "skill_name": planned.skill.name,
-                    "reason": planned.reason,
+                    "message": f"Planner failed: {exc}",
                 },
             }
+        workflow_label = "planner-selected"
 
-    for skipped in plan.skipped_skills:
-        yield {
-            "type": "skill_skipped_by_manager",
-            "payload": {
-                "agent": "ManagerPlannerAgent",
-                **skipped,
-            },
-        }
+    # Announce planner decisions only in WF3.
+    if workflow_label == "planner-selected":
+        for planned in plan.planned_skills:
+            if planned.source == "manager":
+                yield {
+                    "type": "skill_selected_by_manager",
+                    "payload": {
+                        "agent": "ManagerPlannerAgent",
+                        "skill_id": planned.skill.id,
+                        "skill_name": planned.skill.name,
+                        "reason": planned.reason,
+                    },
+                }
+        for skipped in plan.skipped_skills:
+            yield {
+                "type": "skill_skipped_by_manager",
+                "payload": {
+                    "agent": "ManagerPlannerAgent",
+                    **skipped,
+                },
+            }
 
     yield {
         "type": "execution_plan_created",
         "payload": {
-            "agent": "ManagerPlannerAgent",
+            "agent": "AgenticTaskOrchestrator",
+            "workflow": workflow_label,
             "skills": [
                 {
                     "skill_id": planned.skill.id,
@@ -246,7 +300,8 @@ async def run_agentic_task(
         },
     }
 
-    if plan.no_relevant_skills and not required_skills:
+    # WF3 fallback: planner found no relevant skills → run direct research agent.
+    if plan.no_relevant_skills and workflow_label == "planner-selected":
         yield {
             "type": "no_relevant_skills",
             "payload": {
@@ -265,17 +320,46 @@ async def run_agentic_task(
             yield event
         return
 
+    # No skills at all (e.g. empty DB) and WF2 → research fallback.
+    if not plan.planned_skills:
+        yield {
+            "type": "no_relevant_skills",
+            "payload": {
+                "agent": "AgenticTaskOrchestrator",
+                "message": "No active skills available. Running a direct manager research response.",
+            },
+        }
+        async for event in _run_research_manager(
+            prompt,
+            mcp_servers,
+            stock=stock,
+            context=context,
+            trace_id=trace_id,
+            trace_metadata=trace_metadata,
+        ):
+            yield event
+        return
+
     skills = [planned.skill for planned in plan.planned_skills]
 
     yield {
         "type": "manager_started",
         "payload": {
-            "agent": "ManagerAgent",
+            "agent": "AgenticTaskOrchestrator",
             "detail": f"Running {len(skills)} specialist skill agents",
         },
     }
 
-    async def worker(skill: Skill) -> None:
+    # ── Run specialists sequentially so their text streams cleanly, one     ──
+    # ── section per skill. All share the same trace_id so the dashboard    ──
+    # ── shows them as nested spans under the single "Agentic task" trace.  ──
+    drain_task: asyncio.Task[None] | None = None
+
+    async def run_one(skill: Skill, is_first: bool) -> None:
+        # Inject a Markdown header between skills so the streamed answer has
+        # clear per-skill sections in real time.
+        header = f"## {skill.name}\n\n" if is_first else f"\n\n---\n\n## {skill.name}\n\n"
+        await queue.put({"type": "text_delta", "payload": {"delta": header}})
         try:
             result = await _run_specialist(
                 skill,
@@ -301,50 +385,49 @@ async def run_agentic_task(
                     },
                 }
             )
-        finally:
-            await queue.put({"type": "_specialist_done", "payload": {"skill_id": skill.id}})
 
-    tasks = [asyncio.create_task(worker(skill)) for skill in skills]
-    remaining = len(tasks)
-    while remaining:
-        event = await queue.get()
-        if event["type"] == "_specialist_done":
-            remaining -= 1
-            continue
-        yield event
+    async def run_all() -> None:
+        for index, skill in enumerate(skills):
+            await run_one(skill, is_first=index == 0)
+        await queue.put({"type": "_all_done", "payload": {}})
 
-    await asyncio.gather(*tasks, return_exceptions=True)
+    drain_task = asyncio.create_task(run_all())
+    try:
+        while True:
+            event = await queue.get()
+            if event["type"] == "_all_done":
+                break
+            yield event
+    finally:
+        if drain_task and not drain_task.done():
+            drain_task.cancel()
+        try:
+            await drain_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
-    successful = [result for result in results if result.output.strip()]
+    successful = [r for r in results if r.output.strip()]
     if not successful:
-        if any(result.image_count > 0 for result in results):
-            yield {
-                "type": "manager_completed",
-                "payload": {
-                    "agent": "ManagerAgent",
-                    "summary": "Visual artifacts completed",
-                },
-            }
-            return
         yield {
             "type": "error",
             "payload": {
-                "agent": "ManagerAgent",
+                "agent": "AgenticTaskOrchestrator",
                 "message": "No specialist produced a usable result.",
             },
         }
         return
 
-    async for event in _run_manager(
-        prompt,
-        successful,
-        mcp_servers,
-        stock=stock,
-        context=context,
-        trace_id=trace_id,
-        trace_metadata=trace_metadata,
-    ):
-        yield event
+    yield {
+        "type": "manager_completed",
+        "payload": {
+            "agent": "AgenticTaskOrchestrator",
+            "summary": f"Gathered outputs from {len(successful)} specialist(s)",
+            "skills": [
+                {"skill_id": r.skill_id, "skill_name": r.skill_name}
+                for r in successful
+            ],
+        },
+    }
 
 
 async def _run_specialist(
@@ -357,6 +440,13 @@ async def _run_specialist(
     trace_id: str | None = None,
     trace_metadata: dict[str, Any] | None = None,
 ) -> SpecialistResult:
+    """Run a single specialist agent and stream its events into the shared queue.
+
+    All specialists share the parent workflow's `trace_id` via `run_config`.
+    The Runner automatically creates an `agent_span` under that shared trace,
+    so each specialist appears as a nested span inside the single "Agentic task"
+    trace in the Agent Traces dashboard — not as a separate top-level trace.
+    """
     await queue.put(
         {
             "type": "specialist_started",
@@ -376,71 +466,28 @@ async def _run_specialist(
         "skill_id": skill.id,
         "skill_name": skill.name,
         "stock": stock,
-        "workflow": "Specialist skill agent",
     }
-    with agent_span(
-        agent.name,
-        tools=["MCP servers", "WebSearch", "ImageGeneration"],
-        disabled=tracing_disabled(),
-    ):
-        result = Runner.run_streamed(
-            agent,
-            input=specialist_prompt,
-            max_turns=20,
-            run_config=run_config(
-                "Specialist skill agent",
-                trace_id=trace_id,
-                group_id=stock,
-                metadata=metadata,
-            ),
-        )
-        text_parts: list[str] = []
 
-        async for event in result.stream_events():
-            async for normalized in _normalize_agent_event(event, skill):
-                if normalized["type"] == "text_delta":
-                    text_parts.append(normalized["payload"]["delta"])
-                    continue
-                await queue.put(normalized)
+    result = Runner.run_streamed(
+        agent,
+        input=specialist_prompt,
+        max_turns=20,
+        run_config=run_config(
+            "Agentic task",
+            trace_id=trace_id,
+            group_id=stock,
+            metadata=metadata,
+        ),
+    )
 
-    images = _extract_image_payloads(result)
-    for index, image in enumerate(images):
-        image_id = f"image-{uuid.uuid4()}"
-        await queue.put(
-            {
-                "type": "image_generation_started",
-                "payload": {
-                    "id": image_id,
-                    "agent": skill.name,
-                    "skill_id": skill.id,
-                    "title": f"{skill.name} visualization" if len(images) == 1 else f"{skill.name} visualization {index + 1}",
-                    "description": "Generated by specialist skill agent.",
-                    "trace_id": trace_id,
-                    "trace_url": trace_url(trace_id) if trace_id else None,
-                    "model": image_model(),
-                    "size": os.getenv("OPENAI_IMAGE_SIZE", "1024x1024"),
-                    "quality": os.getenv("OPENAI_IMAGE_QUALITY", "medium"),
-                },
-            }
-        )
-        await queue.put(
-            {
-                "type": "image_generated",
-                "payload": {
-                    "id": image_id,
-                    "agent": skill.name,
-                    "skill_id": skill.id,
-                    "title": f"{skill.name} visualization" if len(images) == 1 else f"{skill.name} visualization {index + 1}",
-                    "description": "Generated by specialist skill agent.",
-                    "image": image,
-                    "trace_id": trace_id,
-                    "trace_url": trace_url(trace_id) if trace_id else None,
-                    "model": image_model(),
-                    "size": os.getenv("OPENAI_IMAGE_SIZE", "1024x1024"),
-                    "quality": os.getenv("OPENAI_IMAGE_QUALITY", "medium"),
-                },
-            }
-        )
+    text_parts: list[str] = []
+    async for event in result.stream_events():
+        async for normalized in _normalize_agent_event(event, skill):
+            if normalized["type"] == "text_delta":
+                text_parts.append(normalized["payload"]["delta"])
+            # Forward every event (including text_delta) to the queue so the
+            # frontend can stream specialist text in real time.
+            await queue.put(normalized)
 
     output = getattr(result, "final_output", None) or "".join(text_parts)
     await queue.put(
@@ -453,7 +500,7 @@ async def _run_specialist(
             },
         }
     )
-    return SpecialistResult(skill_id=skill.id, skill_name=skill.name, output=str(output), image_count=len(images))
+    return SpecialistResult(skill_id=skill.id, skill_name=skill.name, output=str(output))
 
 
 async def _plan_skill_execution(
@@ -475,22 +522,17 @@ async def _plan_skill_execution(
         "stock": stock,
         "workflow": "Manager planner",
     }
-    with agent_span(
-        "ManagerPlannerAgent",
-        tools=["MCP servers", "WebSearch", "ImageGeneration"],
-        disabled=tracing_disabled(),
-    ):
-        result = Runner.run_streamed(
-            planner,
-            input=_planner_prompt(prompt, required_skills, active_skills, stock=stock, context=context),
-            max_turns=8,
-            run_config=run_config("Manager planner", trace_id=trace_id, group_id=stock, metadata=metadata),
-        )
-        text_parts: list[str] = []
-        async for event in result.stream_events():
-            async for normalized in _normalize_common_event(event):
-                if normalized["type"] == "text_delta":
-                    text_parts.append(normalized["payload"]["delta"])
+    result = Runner.run_streamed(
+        planner,
+        input=_planner_prompt(prompt, required_skills, active_skills, stock=stock, context=context),
+        max_turns=8,
+        run_config=run_config("Manager planner", trace_id=trace_id, group_id=stock, metadata=metadata),
+    )
+    text_parts: list[str] = []
+    async for event in result.stream_events():
+        async for normalized in _normalize_common_event(event):
+            if normalized["type"] == "text_delta":
+                text_parts.append(normalized["payload"]["delta"])
 
     raw_output = str(getattr(result, "final_output", None) or "".join(text_parts))
     payload = _extract_json_object(raw_output)
@@ -568,20 +610,15 @@ async def _run_manager(
         "stock": stock,
         "workflow": "Manager synthesis",
     }
-    with agent_span(
-        "ManagerAgent",
-        tools=["MCP servers", "WebSearch", "ImageGeneration"],
-        disabled=tracing_disabled(),
-    ):
-        result = Runner.run_streamed(
-            manager,
-            input=manager_prompt,
-            max_turns=8,
-            run_config=run_config("Manager synthesis", trace_id=trace_id, group_id=stock, metadata=metadata),
-        )
-        async for event in result.stream_events():
-            async for normalized in _normalize_manager_event(event, "ManagerAgent"):
-                yield normalized
+    result = Runner.run_streamed(
+        manager,
+        input=manager_prompt,
+        max_turns=8,
+        run_config=run_config("Manager synthesis", trace_id=trace_id, group_id=stock, metadata=metadata),
+    )
+    async for event in result.stream_events():
+        async for normalized in _normalize_manager_event(event, "ManagerAgent"):
+            yield normalized
     yield {
         "type": "manager_completed",
         "payload": {
@@ -606,20 +643,15 @@ async def _run_research_manager(
         "stock": stock,
         "workflow": "Manager research",
     }
-    with agent_span(
-        "ManagerResearchAgent",
-        tools=["MCP servers", "WebSearch", "ImageGeneration"],
-        disabled=tracing_disabled(),
-    ):
-        result = Runner.run_streamed(
-            agent,
-            input=_research_prompt(prompt, stock=stock, context=context),
-            max_turns=12,
-            run_config=run_config("Manager research", trace_id=trace_id, group_id=stock, metadata=metadata),
-        )
-        async for event in result.stream_events():
-            async for normalized in _normalize_manager_event(event, "ManagerResearchAgent"):
-                yield normalized
+    result = Runner.run_streamed(
+        agent,
+        input=_research_prompt(prompt, stock=stock, context=context),
+        max_turns=12,
+        run_config=run_config("Manager research", trace_id=trace_id, group_id=stock, metadata=metadata),
+    )
+    async for event in result.stream_events():
+        async for normalized in _normalize_manager_event(event, "ManagerResearchAgent"):
+            yield normalized
     yield {
         "type": "manager_completed",
         "payload": {
@@ -642,22 +674,17 @@ async def build_skill_draft(
         "agent": "SkillPromptBuilderAgent",
         "workflow": "Skill prompt builder",
     }
-    with agent_span(
-        "SkillPromptBuilderAgent",
-        tools=["MCP servers", "WebSearch", "ImageGeneration"],
-        disabled=tracing_disabled(),
-    ):
-        result = Runner.run_streamed(
-            agent,
-            input=_skill_draft_prompt(prompt, context=context),
-            max_turns=8,
-            run_config=run_config("Skill prompt builder", trace_id=trace_id, metadata=metadata),
-        )
-        text_parts: list[str] = []
-        async for event in result.stream_events():
-            async for normalized in _normalize_common_event(event):
-                if normalized["type"] == "text_delta":
-                    text_parts.append(normalized["payload"]["delta"])
+    result = Runner.run_streamed(
+        agent,
+        input=_skill_draft_prompt(prompt, context=context),
+        max_turns=8,
+        run_config=run_config("Skill prompt builder", trace_id=trace_id, metadata=metadata),
+    )
+    text_parts: list[str] = []
+    async for event in result.stream_events():
+        async for normalized in _normalize_common_event(event):
+            if normalized["type"] == "text_delta":
+                text_parts.append(normalized["payload"]["delta"])
 
     raw_output = str(getattr(result, "final_output", None) or "".join(text_parts))
     payload = _extract_json_object(raw_output)
@@ -666,6 +693,157 @@ async def build_skill_draft(
         "description": str(payload.get("description") or "由 Skill Prompt Builder 產生的技能草稿。"),
         "instructions": str(payload.get("instructions") or prompt),
     }
+
+
+async def run_skill_visualizations(
+    prompt: str,
+    answer: str,
+    required_skills: list[Skill],
+    stock: str | None = None,
+    context: str | None = None,
+    trace_id: str | None = None,
+    trace_metadata: dict[str, Any] | None = None,
+    session_id: str | None = None,
+    message_id: str | None = None,
+) -> AsyncIterator[dict[str, Any]]:
+    """Run image generation agents in parallel — one per required skill."""
+
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    async def generate_one(skill: Skill) -> None:
+        image_id = f"image-{uuid.uuid4()}"
+        title = f"{skill.name} visualization"
+        metadata = {
+            **(trace_metadata or {}),
+            "agent": f"SkillVisualizationAgent-{skill.name}",
+            "skill_id": skill.id,
+            "skill_name": skill.name,
+            "stock": stock,
+            "session_id": session_id,
+            "message_id": message_id,
+            "workflow": "Skill visualization",
+        }
+        await queue.put({
+            "type": "image_generation_started",
+            "payload": {
+                "id": image_id,
+                "agent": f"SkillVisualizationAgent-{skill.name}",
+                "skill_id": skill.id,
+                "skill_name": skill.name,
+                "title": title,
+                "description": "Generating a visual artifact from this skill's answer section.",
+                "trace_id": trace_id,
+                "trace_url": trace_url(trace_id) if trace_id else None,
+                "model": image_model(),
+                "size": os.getenv("OPENAI_IMAGE_SIZE", "1024x1024"),
+                "quality": os.getenv("OPENAI_IMAGE_QUALITY", "medium"),
+            },
+        })
+
+        try:
+            result = await Runner.run(
+                build_skill_visualization_agent(skill),
+                _visualization_prompt(prompt, answer, skill, stock=stock, context=context),
+                max_turns=6,
+                run_config=run_config(
+                    "Skill visualization",
+                    trace_id=trace_id,
+                    group_id=stock or session_id,
+                    metadata=metadata,
+                ),
+            )
+        except Exception as exc:
+            await queue.put({
+                "type": "error",
+                "payload": {
+                    "agent": f"SkillVisualizationAgent-{skill.name}",
+                    "skill_id": skill.id,
+                    "message": str(exc),
+                },
+            })
+            return
+
+        images = _extract_image_payloads(result)
+        if not images:
+            await queue.put({
+                "type": "error",
+                "payload": {
+                    "agent": f"SkillVisualizationAgent-{skill.name}",
+                    "skill_id": skill.id,
+                    "message": f"No image was generated for {skill.name}.",
+                },
+            })
+            return
+
+        description = _summarize_text(_stringify_output(getattr(result, "final_output", "")) or skill.description)
+        await queue.put({
+            "type": "image_generated",
+            "payload": {
+                "id": image_id,
+                "agent": f"SkillVisualizationAgent-{skill.name}",
+                "skill_id": skill.id,
+                "skill_name": skill.name,
+                "title": title,
+                "description": description or "Generated from the final answer and selected skill.",
+                "image": images[0],
+                "trace_id": trace_id,
+                "trace_url": trace_url(trace_id) if trace_id else None,
+                "model": image_model(),
+                "size": os.getenv("OPENAI_IMAGE_SIZE", "1024x1024"),
+                "quality": os.getenv("OPENAI_IMAGE_QUALITY", "medium"),
+            },
+        })
+
+    # Launch all image generation tasks in parallel.
+    tasks = [asyncio.create_task(generate_one(skill)) for skill in required_skills]
+
+    # Drain the queue as events arrive, until all tasks complete.
+    finished = 0
+    total = len(tasks)
+    while finished < total:
+        # Check for completed tasks between queue polls.
+        done_tasks = [t for t in tasks if t.done()]
+        for t in done_tasks:
+            if t not in tasks:
+                continue
+            finished += 1
+            tasks.remove(t)
+            # Re-raise if a task failed unexpectedly (shouldn't happen — errors are caught inside).
+            if t.exception() and not isinstance(t.exception(), Exception):
+                raise t.exception()  # type: ignore[misc]
+
+        try:
+            event = await asyncio.wait_for(queue.get(), timeout=0.1)
+            yield event
+        except asyncio.TimeoutError:
+            continue
+
+    # Drain any remaining events in the queue.
+    while not queue.empty():
+        yield await queue.get()
+
+
+def _visualization_prompt(
+    prompt: str,
+    answer: str,
+    skill: Skill,
+    stock: str | None = None,
+    context: str | None = None,
+) -> str:
+    return (
+        "Create exactly one finance visualization image.\n"
+        f"Skill title: {skill.name}\n"
+        f"Skill description: {skill.description}\n"
+        f"Skill instructions: {skill.instructions[:1200]}\n"
+        f"Stock: {stock or '(not specified)'}\n"
+        f"Original user prompt: {prompt}\n\n"
+        "Use the answer below as the primary source. Focus only on the part that corresponds to this skill. "
+        "If exact values are missing, visualize qualitative relationships and clearly mark assumptions. "
+        "Prefer a clean dashboard/infographic layout, readable Traditional Chinese labels when the answer is Chinese, "
+        "and avoid dense paragraphs inside the image.\n\n"
+        f"Final answer:\n{answer[:7000]}\n\n"
+        f"Conversation context:\n{(context or '')[-2500:]}"
+    )
 
 
 def _planner_prompt(

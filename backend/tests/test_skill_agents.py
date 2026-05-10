@@ -1,5 +1,7 @@
+import asyncio
 import unittest
 import os
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from pydantic import ValidationError
@@ -7,8 +9,14 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from skill_agents.models import Base, ChatSession, Skill
-from skill_agents.orchestrator import MAX_EXECUTED_SKILLS, _required_only_plan
-from skill_agents.schemas import AgenticTaskRequest
+from skill_agents.orchestrator import (
+    MAX_EXECUTED_SKILLS,
+    _builtin_tools,
+    _required_only_plan,
+    _run_specialist,
+    run_skill_visualizations,
+)
+from skill_agents.schemas import AgenticTaskRequest, VisualizationRequest
 from skill_agents.seeds import DEFAULT_SKILLS, seed_default_skills
 
 
@@ -98,6 +106,17 @@ class AgenticTaskSchemaTests(unittest.TestCase):
         self.assertEqual(request.required_skill_ids, ["b"])
 
 
+class VisualizationRequestSchemaTests(unittest.TestCase):
+    def test_requires_at_least_one_required_skill(self):
+        with self.assertRaises(ValidationError):
+            VisualizationRequest(prompt="分析 2330", answer="完成", required_skill_ids=[])
+
+    def test_deduplicates_required_skill_ids(self):
+        request = VisualizationRequest(prompt="分析 2330", answer="完成", required_skill_ids=["a", "a", "b"])
+
+        self.assertEqual(request.required_skill_ids, ["a", "b"])
+
+
 class SkillPlanningTests(unittest.TestCase):
     def test_required_only_plan_preserves_required_skills_under_limit(self):
         skills = [
@@ -109,6 +128,57 @@ class SkillPlanningTests(unittest.TestCase):
 
         self.assertEqual(len(plan.planned_skills), MAX_EXECUTED_SKILLS)
         self.assertTrue(all(planned.source == "required" for planned in plan.planned_skills))
+
+    def test_specialist_runs_in_dedicated_trace(self):
+        skill = Skill(id="skill-1", name="PE/PB 分析", description="估值分析", instructions="分析 PE/PB")
+        queue = asyncio.Queue()
+
+        class FakeStreamResult:
+            final_output = "PE/PB specialist output"
+
+            async def stream_events(self):
+                if False:
+                    yield None
+
+        @contextmanager
+        def fake_workflow_trace(*args, **kwargs):
+            yield None
+
+        async def run_specialist():
+            return await _run_specialist(
+                skill,
+                "分析 2330",
+                [],
+                queue,
+                stock="2330",
+                trace_id="trace_parent",
+                trace_metadata={"endpoint": "/api/agentic-task/stream"},
+            )
+
+        with patch("skill_agents.orchestrator.new_trace_id", return_value="trace_skill"), patch(
+            "skill_agents.orchestrator.workflow_trace",
+            side_effect=fake_workflow_trace,
+        ) as workflow_trace, patch(
+            "skill_agents.orchestrator.Runner.run_streamed",
+            return_value=FakeStreamResult(),
+        ) as run_streamed:
+            result = asyncio.run(run_specialist())
+
+        workflow_trace.assert_called_once()
+        self.assertEqual(workflow_trace.call_args.args[0], "Skill agent: PE/PB 分析")
+        self.assertEqual(workflow_trace.call_args.kwargs["trace_id"], "trace_skill")
+        self.assertEqual(workflow_trace.call_args.kwargs["metadata"]["parent_trace_id"], "trace_parent")
+        run_config = run_streamed.call_args.kwargs["run_config"]
+        self.assertEqual(run_config.trace_id, "trace_skill")
+        self.assertEqual(run_config.trace_metadata["parent_trace_id"], "trace_parent")
+        self.assertEqual(result.output, "PE/PB specialist output")
+        queued_events = []
+        while not queue.empty():
+            queued_events.append(queue.get_nowait())
+        self.assertEqual(queued_events[0]["type"], "trace_started")
+        self.assertEqual(queued_events[0]["payload"]["workflow"], "Skill agent: PE/PB 分析")
+        self.assertEqual(queued_events[-2]["type"], "trace_completed")
+        self.assertEqual(queued_events[-2]["payload"]["trace_id"], "trace_skill")
 
 
 class SkillAgentImageModelTests(unittest.TestCase):
@@ -123,6 +193,47 @@ class SkillAgentImageModelTests(unittest.TestCase):
 
         with patch.dict(os.environ, {"OPENAI_IMAGE_MODEL": "custom-image-model"}):
             self.assertEqual(image_model(), "custom-image-model")
+
+    def test_default_agentic_tools_do_not_include_image_generation(self):
+        tool_names = [tool.__class__.__name__ for tool in _builtin_tools()]
+
+        self.assertIn("WebSearchTool", tool_names)
+        self.assertNotIn("ImageGenerationTool", tool_names)
+
+
+class SkillVisualizationTests(unittest.TestCase):
+    def test_visualization_stream_emits_one_image_per_required_skill(self):
+        skill = Skill(id="skill-1", name="PE/PB 分析", description="估值分析", instructions="分析 PE/PB")
+
+        class FakeResult:
+            final_output = "估值圖表"
+
+        async def fake_run(*args, **kwargs):
+            return FakeResult()
+
+        async def collect_events():
+            events = []
+            async for event in run_skill_visualizations(
+                "分析 2330",
+                "PE/PB 分析結果",
+                [skill],
+                stock="2330",
+                trace_id="trace_123",
+            ):
+                events.append(event)
+            return events
+
+        with patch("skill_agents.orchestrator.Runner.run", side_effect=fake_run), patch(
+            "skill_agents.orchestrator._extract_image_payloads",
+            return_value=[{"b64_json": "abc" + "x" * 200, "image_url": "data:image/png;base64,abc"}],
+        ):
+            events = asyncio.run(collect_events())
+
+        self.assertEqual([event["type"] for event in events], ["image_generation_started", "image_generated"])
+        generated = events[1]["payload"]
+        self.assertEqual(generated["skill_id"], "skill-1")
+        self.assertEqual(generated["skill_name"], "PE/PB 分析")
+        self.assertEqual(generated["trace_id"], "trace_123")
 
 
 if __name__ == "__main__":

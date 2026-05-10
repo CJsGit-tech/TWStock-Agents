@@ -1,4 +1,4 @@
-from .orchestrator import build_skill_draft, run_agentic_task
+from .orchestrator import build_skill_draft, run_agentic_task, run_skill_visualizations
 from .schemas import (
     AgenticTaskRequest,
     ChatSessionCreate,
@@ -10,6 +10,7 @@ from .schemas import (
     SkillDraftResponse,
     SkillRead,
     SkillUpdate,
+    VisualizationRequest,
 )
 
 __all__ = [
@@ -23,6 +24,8 @@ __all__ = [
     "SkillCreate",
     "SkillRead",
     "SkillUpdate",
+    "VisualizationRequest",
     "build_skill_draft",
     "run_agentic_task",
+    "run_skill_visualizations",
 ]

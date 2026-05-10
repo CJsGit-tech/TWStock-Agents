@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -36,14 +37,17 @@ from skill_agents import (
     SkillDraftResponse,
     SkillRead,
     SkillUpdate,
+    VisualizationRequest,
     build_skill_draft,
     run_agentic_task,
+    run_skill_visualizations,
 )
 from skill_agents.db import get_session, initialize_database
 from skill_agents.models import ChatSession, Skill
 from agent_tracing import (
     configure_tracing,
     configure_tracing_api_key,
+    flush_trace_exports,
     new_trace_id,
     run_config,
     trace_url,
@@ -293,6 +297,24 @@ async def agentic_task_stream(
     )
 
 
+@app.post("/api/visualizations/stream")
+async def visualizations_stream(
+    request: VisualizationRequest,
+    session: Session = Depends(get_session),
+) -> StreamingResponse:
+    required_skills, _active_skills = load_agentic_skills(session, request.required_skill_ids)
+    if not required_skills:
+        raise HTTPException(status_code=400, detail="At least one required skill is needed to generate images.")
+    return StreamingResponse(
+        stream_visualization_events(request, required_skills),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 def build_mcp_servers() -> list[MCPServerStreamableHttp]:
     return [
         MCPServerStreamableHttp(
@@ -421,9 +443,13 @@ async def stream_agent_events(messages: list[ChatMessage]) -> AsyncIterator[str]
                     {"trace_id": trace_id, "trace_url": trace_url(trace_id), "workflow": "MCP chat"},
                 )
                 yield encode_event("done", {})
+    except asyncio.CancelledError:
+        logger.warning("Chat stream cancelled (client disconnect)")
     except Exception as exc:
         logger.exception("Chat stream failed")
         yield encode_event("error", error_payload(exc))
+    finally:
+        await flush_trace_exports()
 
 
 async def stream_financial_analysis_events(
@@ -481,9 +507,13 @@ async def stream_financial_analysis_events(
                     {"trace_id": trace_id, "trace_url": trace_url(trace_id), "workflow": "Financial analysis"},
                 )
                 yield encode_event("done", {})
+    except asyncio.CancelledError:
+        logger.warning("Financial analysis stream cancelled (client disconnect)")
     except Exception as exc:
         logger.exception("Financial analysis stream failed")
         yield encode_event("error", error_payload(exc))
+    finally:
+        await flush_trace_exports()
 
 
 async def stream_agentic_task_events(
@@ -541,6 +571,7 @@ async def stream_agentic_task_events(
                     context=request.context,
                     trace_id=trace_id,
                     trace_metadata=trace_metadata,
+                    session_id=request.session_id,
                 ):
                     yield encode_event(event["type"], event["payload"])
 
@@ -549,9 +580,74 @@ async def stream_agentic_task_events(
                     {"trace_id": trace_id, "trace_url": trace_url(trace_id), "workflow": "Agentic task"},
                 )
                 yield encode_event("done", {})
+    except asyncio.CancelledError:
+        logger.warning("Agentic task stream cancelled (client disconnect)")
     except Exception as exc:
         logger.exception("Agentic task stream failed")
         yield encode_event("error", error_payload(exc))
+    finally:
+        await flush_trace_exports()
+
+
+async def stream_visualization_events(
+    request: VisualizationRequest,
+    required_skills: list[Skill],
+) -> AsyncIterator[str]:
+    if not openai_api_key_configured():
+        yield encode_event(
+            "error",
+            {
+                "message": "OPENAI_API_KEY is not set on the backend service.",
+            },
+        )
+        return
+
+    trace_id = new_trace_id()
+    trace_metadata = {
+        "endpoint": "/api/visualizations/stream",
+        "workflow": "Skill visualizations",
+        "stock": request.stock,
+        "required_skill_count": len(required_skills),
+        "session_id": request.session_id,
+        "message_id": request.message_id,
+    }
+    yield encode_event(
+        "trace_started",
+        {"trace_id": trace_id, "trace_url": trace_url(trace_id), "workflow": "Skill visualizations"},
+    )
+
+    try:
+        with workflow_trace(
+            "Skill visualizations",
+            trace_id=trace_id,
+            group_id=request.stock or request.session_id,
+            metadata=trace_metadata,
+        ):
+            async for event in run_skill_visualizations(
+                request.prompt,
+                request.answer,
+                required_skills,
+                stock=request.stock,
+                context=request.context,
+                trace_id=trace_id,
+                trace_metadata=trace_metadata,
+                session_id=request.session_id,
+                message_id=request.message_id,
+            ):
+                yield encode_event(event["type"], event["payload"])
+
+            yield encode_event(
+                "trace_completed",
+                {"trace_id": trace_id, "trace_url": trace_url(trace_id), "workflow": "Skill visualizations"},
+            )
+            yield encode_event("done", {})
+    except asyncio.CancelledError:
+        logger.warning("Visualization stream cancelled (client disconnect)")
+    except Exception as exc:
+        logger.exception("Visualization stream failed")
+        yield encode_event("error", error_payload(exc))
+    finally:
+        await flush_trace_exports()
 
 
 async def normalize_agent_event(event: Any) -> AsyncIterator[dict[str, Any]]:

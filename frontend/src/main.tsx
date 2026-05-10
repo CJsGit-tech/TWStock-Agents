@@ -1,20 +1,26 @@
-import React, { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import React, { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
+  ArrowDown,
   Brain,
+  ChevronLeft,
+  ChevronRight,
   CheckCircle2,
   ChevronDown,
   CircleHelp,
-  Compass,
   Copy,
   Download,
   ExternalLink,
+  KeyRound,
   Languages,
   Loader2,
   MessageSquare,
   Mic,
   Pencil,
   Plus,
+  RefreshCw,
   Send,
   Server,
   ShieldCheck,
@@ -62,6 +68,13 @@ interface Message {
   images?: GeneratedImage[];
   activities?: ActivityItem[];
   activitiesComplete?: boolean;
+  sourcePrompt?: string;
+  stock?: string;
+  requiredSkillIds?: string[];
+  requiredSkillsSnapshot?: SkillSnapshot[];
+  workflow?: Workflow;
+  visualStatus?: "idle" | "generating" | "complete" | "error";
+  errored?: boolean;
 }
 
 interface StreamEvent {
@@ -115,6 +128,12 @@ interface Skill {
   description: string;
   instructions: string;
   is_active: boolean;
+}
+
+interface SkillSnapshot {
+  id: string;
+  name: string;
+  description: string;
 }
 
 interface SkillDraft {
@@ -285,8 +304,8 @@ const TRANSLATIONS = {
     saveKey: "Save key",
     apiKeyPasteFirst: "Paste an OpenAI API key first.",
     apiKeySaved: "API key is set for this backend session.",
-    apiKeyHint: "Open the compass button under the chat input and paste your OpenAI API key.",
-    apiKeyMissing: "OpenAI API key is missing. Use the compass button under the chat input to paste your key, then run the request again.",
+    apiKeyHint: "Open the key button under the chat input and paste your OpenAI API key.",
+    apiKeyMissing: "OpenAI API key is missing. Use the key button under the chat input to paste your key, then run the request again.",
     openApiSettings: "Open API key settings",
     voiceInput: "Voice input",
     stopVoiceInput: "Stop voice input",
@@ -343,6 +362,11 @@ const TRANSLATIONS = {
     round: (index: number) => `Round ${index}`,
     language: "Language",
     visualArtifacts: "Visual artifacts",
+    generateImages: "Generate Images",
+    generatingImages: "Generating images",
+    noSavedRequiredSkills: "This answer has no saved required skills.",
+    deleteRoundLogs: "Delete round logs",
+    eventSession: "Event session",
     imageGenerating: "Generating image...",
     viewImage: "View",
     downloadImage: "Download",
@@ -364,6 +388,13 @@ const TRANSLATIONS = {
     activityRunningAgent: (name: string) => `Running ${name}`,
     activityFinishedAgent: (name: string) => `Completed ${name}`,
     activitySelectedSkill: (name: string) => `Selected ${name}`,
+    roleYou: "You",
+    roleAssistant: "Assistant",
+    retry: "Retry",
+    copyMessage: "Copy message",
+    scrollToBottom: "Scroll to latest",
+    errorRetryHint: "Something went wrong. Use the retry button to try again.",
+    skillDraftOverwrite: "Replace your current draft with a new AI-generated one?",
   },
   "zh-TW": {
     eyebrow: "財務分析 + FastMCP 工具",
@@ -383,8 +414,8 @@ const TRANSLATIONS = {
     saveKey: "儲存金鑰",
     apiKeyPasteFirst: "請先貼上 OpenAI API 金鑰。",
     apiKeySaved: "API 金鑰已設定到此後端工作階段。",
-    apiKeyHint: "點擊聊天輸入框下方的指南針按鈕並貼上 OpenAI API 金鑰。",
-    apiKeyMissing: "缺少 OpenAI API 金鑰。請使用聊天輸入框下方的指南針按鈕貼上金鑰，然後重新送出請求。",
+    apiKeyHint: "點擊聊天輸入框下方的金鑰按鈕並貼上 OpenAI API 金鑰。",
+    apiKeyMissing: "缺少 OpenAI API 金鑰。請使用聊天輸入框下方的金鑰按鈕貼上金鑰，然後重新送出請求。",
     openApiSettings: "開啟 API 金鑰設定",
     voiceInput: "語音輸入",
     stopVoiceInput: "停止語音輸入",
@@ -441,6 +472,11 @@ const TRANSLATIONS = {
     round: (index: number) => `第 ${index} 回合`,
     language: "語言",
     visualArtifacts: "視覺產物",
+    generateImages: "產生圖片",
+    generatingImages: "正在產生圖片",
+    noSavedRequiredSkills: "此回答沒有儲存的必用技能。",
+    deleteRoundLogs: "刪除回合紀錄",
+    eventSession: "事件聊天",
     imageGenerating: "正在產生圖片...",
     viewImage: "檢視",
     downloadImage: "下載",
@@ -462,6 +498,13 @@ const TRANSLATIONS = {
     activityRunningAgent: (name: string) => `正在執行 ${name}`,
     activityFinishedAgent: (name: string) => `${name} 已完成`,
     activitySelectedSkill: (name: string) => `已選擇 ${name}`,
+    roleYou: "你",
+    roleAssistant: "助理",
+    retry: "重試",
+    copyMessage: "複製訊息",
+    scrollToBottom: "捲動到最新",
+    errorRetryHint: "發生錯誤。請使用重試按鈕再試一次。",
+    skillDraftOverwrite: "要用新的 AI 草稿取代目前內容嗎？",
   },
   ja: {
     eyebrow: "財務分析 + FastMCP ツール",
@@ -481,8 +524,8 @@ const TRANSLATIONS = {
     saveKey: "キーを保存",
     apiKeyPasteFirst: "OpenAI API キーを貼り付けてください。",
     apiKeySaved: "API キーをこのバックエンドセッションに設定しました。",
-    apiKeyHint: "チャット入力欄の下にあるコンパスボタンを開き、OpenAI API キーを貼り付けてください。",
-    apiKeyMissing: "OpenAI API キーが未設定です。チャット入力欄の下のコンパスボタンからキーを貼り付け、もう一度実行してください。",
+    apiKeyHint: "チャット入力欄の下にあるキーボタンを開き、OpenAI API キーを貼り付けてください。",
+    apiKeyMissing: "OpenAI API キーが未設定です。チャット入力欄の下のキーボタンからキーを貼り付け、もう一度実行してください。",
     openApiSettings: "API キー設定を開く",
     voiceInput: "音声入力",
     stopVoiceInput: "音声入力を停止",
@@ -539,6 +582,11 @@ const TRANSLATIONS = {
     round: (index: number) => `ラウンド ${index}`,
     language: "言語",
     visualArtifacts: "ビジュアル成果物",
+    generateImages: "画像を生成",
+    generatingImages: "画像を生成中",
+    noSavedRequiredSkills: "この回答には保存済みの必須スキルがありません。",
+    deleteRoundLogs: "ラウンドログを削除",
+    eventSession: "イベントセッション",
     imageGenerating: "画像を生成中...",
     viewImage: "表示",
     downloadImage: "ダウンロード",
@@ -560,6 +608,13 @@ const TRANSLATIONS = {
     activityRunningAgent: (name: string) => `${name} を実行中`,
     activityFinishedAgent: (name: string) => `${name} が完了`,
     activitySelectedSkill: (name: string) => `${name} を選択`,
+    roleYou: "あなた",
+    roleAssistant: "アシスタント",
+    retry: "再試行",
+    copyMessage: "メッセージをコピー",
+    scrollToBottom: "最新にスクロール",
+    errorRetryHint: "エラーが発生しました。再試行ボタンをご利用ください。",
+    skillDraftOverwrite: "現在のドラフトを新しい AI 生成ドラフトで置き換えますか？",
   },
 } satisfies Record<Locale, Record<string, string | ((...args: never[]) => string)>>;
 
@@ -587,6 +642,10 @@ function App() {
   const [eventHistory, setEventHistory] = useState<StreamEvent[]>([]);
   const [chatSessions, setChatSessions] = useState<ChatSessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [eventSessionId, setEventSessionId] = useState<string | null>(null);
+  const [eventSessionMessages, setEventSessionMessages] = useState<Message[]>([]);
+  const [eventSessionEvents, setEventSessionEvents] = useState<StreamEvent[]>([]);
+  const [eventSessionPickerOpen, setEventSessionPickerOpen] = useState(false);
   const [activityTab, setActivityTab] = useState<ActivityTab>("sessions");
   const [showSkillDrawer, setShowSkillDrawer] = useState(false);
   const [selectedRoundId, setSelectedRoundId] = useState<string | null>(null);
@@ -608,29 +667,51 @@ function App() {
   const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
   const [apiKeyMessage, setApiKeyMessage] = useState("");
   const [selectedImage, setSelectedImage] = useState<GeneratedImage | null>(null);
+  const [selectedImageGallery, setSelectedImageGallery] = useState<GeneratedImage[]>([]);
+  const [visualizingMessageIds, setVisualizingMessageIds] = useState<string[]>([]);
   const [imageZoomMode, setImageZoomMode] = useState<ImageZoomMode>("fit");
   const [voiceMessage, setVoiceMessage] = useState("");
   const [isListening, setIsListening] = useState(false);
+  const [toasts, setToasts] = useState<{ id: string; message: string; type: "success" | "error" }[]>([]);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
   const eventOrderRef = useRef(0);
   const streamingRef = useRef(false);
   const sessionLoadingRef = useRef(false);
   const sessionSaveTimerRef = useRef<number | null>(null);
+  const toastTimersRef = useRef<Map<string, number>>(new Map());
   const shouldShowStarters = !isStreaming;
   const activeExample = activeGuide ? GUIDED_EXAMPLES.find((example) => example.id === activeGuide.flowId) : null;
   const visibleEvents = allEvents(currentEvent, eventHistory);
-  const eventGroups = groupedEvents(visibleEvents, messages);
+  const selectedEventSessionIsActive = !eventSessionId || eventSessionId === activeSessionId;
+  const eventSessionVisibleEvents = selectedEventSessionIsActive ? visibleEvents : eventSessionEvents;
+  const eventSessionVisibleMessages = selectedEventSessionIsActive ? messages : eventSessionMessages;
+  const eventGroups = groupedEvents(eventSessionVisibleEvents, eventSessionVisibleMessages);
   const selectedRound = eventGroups.find((group) => group.messageId === selectedRoundId) ?? null;
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    // Smart auto-scroll: only scroll if user is already near the bottom.
+    // This prevents hijacking user's scroll while they read earlier content.
+    const el = messageListRef.current;
+    if (!el) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+      return;
+    }
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom < 160) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
   }, [messages]);
 
   useEffect(() => {
     loadSkills();
     loadOpenAIKeyStatus();
     initializeChatSessions();
+    // Auto-show tutorial for first-time users (respects dismissal).
+    if (!localStorage.getItem(TUTORIAL_STORAGE_KEY)) {
+      setShowTutorial(true);
+    }
   }, []);
 
   useEffect(() => {
@@ -656,20 +737,71 @@ function App() {
     setSkillPage((current) => Math.min(current, maxPage));
   }, [skills.length]);
 
+  useEffect(() => {
+    if (!eventSessionId && activeSessionId) {
+      setEventSessionId(activeSessionId);
+    }
+  }, [activeSessionId, eventSessionId]);
+
+  useEffect(() => {
+    // Reset status pill to "Ready" a few seconds after a completed run.
+    if (status !== "complete" && status !== "error") return;
+    const timer = window.setTimeout(() => setStatus("ready"), 4000);
+    return () => window.clearTimeout(timer);
+  }, [status]);
+
+  useEffect(() => {
+    // Auto-dismiss voice notice so it doesn't linger forever.
+    if (!voiceMessage) return;
+    const timer = window.setTimeout(() => setVoiceMessage(""), 4000);
+    return () => window.clearTimeout(timer);
+  }, [voiceMessage]);
+
+  useEffect(() => {
+    // Auto-dismiss api key inline message (toast handles confirmation now).
+    if (!apiKeyMessage) return;
+    const timer = window.setTimeout(() => setApiKeyMessage(""), 5000);
+    return () => window.clearTimeout(timer);
+  }, [apiKeyMessage]);
+
+  function showToast(message: string, type: "success" | "error" = "success") {
+    const id = crypto.randomUUID();
+    setToasts((current) => [...current, { id, message, type }]);
+    const timer = window.setTimeout(() => {
+      setToasts((current) => current.filter((t) => t.id !== id));
+      toastTimersRef.current.delete(id);
+    }, 3000);
+    toastTimersRef.current.set(id, timer);
+  }
+
+  useEffect(() => {
+    return () => {
+      for (const timer of toastTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      toastTimersRef.current.clear();
+    };
+  }, []);
+
   function changeLocale(nextLocale: Locale) {
+    const previousLocale = locale;
     localStorage.setItem(LOCALE_STORAGE_KEY, nextLocale);
     setLocale(nextLocale);
+    // Only rewrite the first assistant message if it's the untouched intro.
+    // This prevents clobbering real assistant replies in loaded sessions.
+    const previousIntro = TRANSLATIONS[previousLocale].assistantIntro;
     setMessages((current) =>
-      current.map((message, index) =>
-        index === 0 && message.role === "assistant"
-          ? { ...message, content: TRANSLATIONS[nextLocale].assistantIntro }
-          : message,
-      ),
+      current.map((message, index) => {
+        if (index !== 0 || message.role !== "assistant") return message;
+        if (message.content.trim() !== previousIntro.trim()) return message;
+        return { ...message, content: TRANSLATIONS[nextLocale].assistantIntro };
+      }),
     );
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+    // Enter to send, Shift+Enter for newline (standard chat UX)
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
       const form = event.currentTarget.closest("form");
       form?.requestSubmit();
@@ -720,6 +852,12 @@ function App() {
     }
     streamingRef.current = true;
 
+    const workflow = workflowOverride ?? guideAction?.workflow ?? inferWorkflow(trimmed);
+    const stock = extractStockInput(trimmed, messages);
+    const requiredSkillIds = [...selectedSkillIds];
+    const requiredSkillsSnapshot = skills
+      .filter((skill) => requiredSkillIds.includes(skill.id))
+      .map((skill) => ({ id: skill.id, name: skill.name, description: skill.description }));
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: "user",
@@ -730,9 +868,14 @@ function App() {
       id: assistantId,
       role: "assistant",
       content: "",
+      sourcePrompt: trimmed,
+      stock,
+      requiredSkillIds,
+      requiredSkillsSnapshot,
+      workflow,
+      visualStatus: "idle",
     };
     const nextMessages = [...messages, userMessage, assistantMessage];
-    const workflow = workflowOverride ?? guideAction?.workflow ?? inferWorkflow(trimmed);
 
     if (guideAction) {
       setActiveGuide({ ...guideAction, status: "streaming" });
@@ -748,7 +891,7 @@ function App() {
       const response = await fetch(`${API_BASE}${endpointForWorkflow(workflow)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payloadForWorkflow(workflow, trimmed, nextMessages, selectedSkillIds)),
+        body: JSON.stringify(payloadForWorkflow(workflow, trimmed, nextMessages, selectedSkillIds, activeSessionId)),
       });
 
       if (!response.ok || !response.body) {
@@ -759,6 +902,9 @@ function App() {
         streamErrored = processStreamPayload(payload, assistantId) || streamErrored;
       });
       if (streamErrored) {
+        setMessages((current) =>
+          current.map((candidate) => (candidate.id === assistantId ? { ...candidate, errored: true } : candidate)),
+        );
         setStatus("error");
       } else {
         completed = true;
@@ -768,8 +914,17 @@ function App() {
       const message = error instanceof Error ? error.message : String(error);
       appendAssistantText(assistantId, `\n\n${message}`);
       appendEvent(assistantId, "error", "Stream error", message);
+      setMessages((current) =>
+        current.map((candidate) => (candidate.id === assistantId ? { ...candidate, errored: true } : candidate)),
+      );
       setStatus("error");
+      streamErrored = true;
     } finally {
+      if (streamErrored) {
+        setMessages((current) =>
+          current.map((candidate) => (candidate.id === assistantId ? { ...candidate, errored: true } : candidate)),
+        );
+      }
       streamingRef.current = false;
       setIsStreaming(false);
       if (guideAction && completed) {
@@ -780,6 +935,78 @@ function App() {
           status: guideAction.stepIndex + 1 >= 2 ? "complete" : "ready-next",
         });
       }
+    }
+  }
+
+  async function retryMessage(assistantMessage: Message) {
+    if (!assistantMessage.sourcePrompt || streamingRef.current) return;
+    // Remove the failed assistant message and its preceding user message,
+    // then resubmit the original prompt using the same workflow.
+    const failedIndex = messages.findIndex((m) => m.id === assistantMessage.id);
+    if (failedIndex < 1) return;
+    const userMessage = messages[failedIndex - 1];
+    if (!userMessage || userMessage.role !== "user") return;
+    // Clear related events and messages.
+    setEventHistory((current) => current.filter((e) => e.messageId !== assistantMessage.id));
+    setCurrentEvent((current) => (current?.messageId === assistantMessage.id ? null : current));
+    setMessages((current) => current.slice(0, failedIndex - 1));
+    await submitPrompt(assistantMessage.sourcePrompt, undefined, assistantMessage.workflow);
+  }
+
+  async function generateImagesForMessage(message: Message) {
+    if (
+      message.role !== "assistant" ||
+      !message.sourcePrompt ||
+      !message.content.trim() ||
+      !message.requiredSkillIds?.length ||
+      visualizingMessageIds.includes(message.id)
+    ) {
+      return;
+    }
+
+    setVisualizingMessageIds((current) => [...current, message.id]);
+    setMessages((current) =>
+      current.map((candidate) => (candidate.id === message.id ? { ...candidate, visualStatus: "generating" } : candidate)),
+    );
+
+    try {
+      const response = await fetch(`${API_BASE}/api/visualizations/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: message.sourcePrompt,
+          answer: message.content,
+          required_skill_ids: message.requiredSkillIds,
+          stock: message.stock,
+          context: financialContext(messages),
+          session_id: activeSessionId,
+          message_id: message.id,
+        }),
+      });
+
+      if (!response.ok || !response.body) {
+        throw new Error(`Visualization stream failed with HTTP ${response.status}`);
+      }
+
+      let streamErrored = false;
+      await readNdjsonStream(response.body, (payload) => {
+        streamErrored = processStreamPayload(payload, message.id) || streamErrored;
+      });
+      setMessages((current) =>
+        current.map((candidate) =>
+          candidate.id === message.id ? { ...candidate, visualStatus: streamErrored ? "error" : "complete" } : candidate,
+        ),
+      );
+      setStatus(streamErrored ? "error" : "complete");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      appendEvent(message.id, "error", "Visualization error", detail);
+      setMessages((current) =>
+        current.map((candidate) => (candidate.id === message.id ? { ...candidate, visualStatus: "error" } : candidate)),
+      );
+      setStatus("error");
+    } finally {
+      setVisualizingMessageIds((current) => current.filter((id) => id !== message.id));
     }
   }
 
@@ -852,6 +1079,9 @@ function App() {
       }
       const created = (await response.json()) as ChatSessionRead;
       setActiveSessionId(created.id);
+      setEventSessionId(created.id);
+      setEventSessionMessages([]);
+      setEventSessionEvents([]);
       setMessages(sanitizeMessages(created.messages_json, locale));
       setEventHistory([]);
       setCurrentEvent(null);
@@ -878,6 +1108,9 @@ function App() {
       const loaded = (await response.json()) as ChatSessionRead;
       const loadedEvents = sanitizeEvents(loaded.events_json);
       setActiveSessionId(loaded.id);
+      setEventSessionId(loaded.id);
+      setEventSessionMessages([]);
+      setEventSessionEvents([]);
       setMessages(sanitizeMessages(loaded.messages_json, locale));
       setEventHistory(loadedEvents);
       setCurrentEvent(null);
@@ -943,6 +1176,65 @@ function App() {
     }
   }
 
+async function openEventSession(sessionId: string) {
+    setEventSessionId(sessionId);
+    setEventSessionPickerOpen(false);
+    setSelectedRoundId(null);
+    if (sessionId === activeSessionId) {
+      setEventSessionMessages([]);
+      setEventSessionEvents([]);
+      return;
+    }
+    const response = await fetch(`${API_BASE}/api/chat-sessions/${sessionId}`);
+    if (!response.ok) {
+      throw new Error(`Chat session load failed with HTTP ${response.status}`);
+    }
+    const loaded = (await response.json()) as ChatSessionRead;
+    setEventSessionMessages(sanitizeMessages(loaded.messages_json, locale));
+    setEventSessionEvents(sanitizeEvents(loaded.events_json));
+  }
+
+  async function deleteRoundLogs(sessionId: string, messageId: string) {
+    const isActive = sessionId === activeSessionId;
+    const sourceMessages = isActive ? messages : eventSessionMessages;
+    const sourceEvents = isActive ? allEvents(currentEvent, eventHistory) : eventSessionEvents;
+    const nextEvents = sourceEvents.filter((event) => event.messageId !== messageId);
+    const nextMessages = sourceMessages.map((message) =>
+      message.id === messageId ? { ...message, activities: [], activitiesComplete: false } : message,
+    );
+    const title = sessionTitle(nextMessages, t.newChat);
+
+    const response = await fetch(`${API_BASE}/api/chat-sessions/${sessionId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title,
+        messages_json: nextMessages,
+        events_json: nextEvents,
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(`Round log delete failed with HTTP ${response.status}`);
+    }
+
+    if (isActive) {
+      setMessages(nextMessages);
+      setCurrentEvent((current) => (current?.messageId === messageId ? null : current));
+      setEventHistory((current) => current.filter((event) => event.messageId !== messageId));
+    } else {
+      setEventSessionMessages(nextMessages);
+      setEventSessionEvents(nextEvents);
+    }
+    setSelectedRoundId((current) => (current === messageId ? null : current));
+    setChatSessions((current) =>
+      current.map((session) =>
+        session.id === sessionId
+          ? { ...session, title, event_count: nextEvents.length, message_count: nextMessages.length, updated_at: new Date().toISOString() }
+          : session,
+      ),
+    );
+  }
+
   async function saveOpenAIKey() {
     const apiKey = apiKeyInput.trim();
     if (!apiKey) {
@@ -963,6 +1255,7 @@ function App() {
       setApiKeyConfigured(true);
       setApiKeyMessage(t.apiKeySaved);
       setShowApiKeyPanel(false);
+      showToast(t.apiKeySaved);
     } catch (error) {
       setApiKeyMessage(error instanceof Error ? error.message : String(error));
     }
@@ -993,6 +1286,7 @@ function App() {
       setSkillDraft(EMPTY_SKILL_DRAFT);
       setEditingSkillId(null);
       setShowSkillEditor(false);
+      showToast(editingSkillId ? "Skill updated" : "Skill created");
       await loadSkills();
     } catch (error) {
       setSkillError(error instanceof Error ? error.message : String(error));
@@ -1046,6 +1340,13 @@ function App() {
     const prompt = input.trim() || skillDraft.description.trim() || skillDraft.name.trim();
     if (!prompt) {
       setSkillError(t.skillDraftPrompt);
+      return;
+    }
+
+    // Warn before overwriting user's in-progress draft.
+    const hasExistingContent =
+      skillDraft.name.trim() || skillDraft.description.trim() || skillDraft.instructions.trim();
+    if (hasExistingContent && !window.confirm(t.skillDraftOverwrite)) {
       return;
     }
 
@@ -1407,13 +1708,17 @@ function App() {
             activeTab={activityTab}
             sessions={chatSessions}
             activeSessionId={activeSessionId}
+            eventSessionId={eventSessionId}
+            eventSessionPickerOpen={eventSessionPickerOpen}
             eventGroups={eventGroups}
             currentEventId={currentEvent?.id}
             onTabChange={setActivityTab}
             onNewSession={createChatSession}
             onOpenSession={openChatSession}
             onDeleteSession={deleteChatSession}
-            onOpenRound={(messageId) => setSelectedRoundId(messageId)}
+            onOpenEventSession={openEventSession}
+            onToggleEventSessionPicker={() => setEventSessionPickerOpen((current) => !current)}
+            onDeleteRoundLogs={(messageId) => eventSessionId && deleteRoundLogs(eventSessionId, messageId)}
             t={t}
           />
 
@@ -1434,6 +1739,7 @@ function App() {
             isListening={isListening}
             voiceMessage={voiceMessage}
             bottomRef={bottomRef}
+            messageListRef={messageListRef}
             onInputChange={setInput}
             onKeyDown={handleKeyDown}
             onSubmit={handleSubmit}
@@ -1448,11 +1754,15 @@ function App() {
             onSaveOpenAIKey={saveOpenAIKey}
             onOpenSkills={() => setShowSkillDrawer(true)}
             onToggleVoiceInput={toggleVoiceInput}
-            onViewImage={(image) => {
+            onViewImage={(image, gallery) => {
               setImageZoomMode("fit");
               setSelectedImage(image);
+              setSelectedImageGallery(gallery);
             }}
             onOpenEvents={(messageId) => setSelectedRoundId(messageId)}
+            onGenerateImages={generateImagesForMessage}
+            onRetry={retryMessage}
+            visualizingMessageIds={visualizingMessageIds}
             t={t}
           />
 
@@ -1472,6 +1782,13 @@ function App() {
               t={t}
             />
           </aside>
+          {showSkillDrawer && (
+            <div
+              className="side-panel-backdrop"
+              onClick={() => setShowSkillDrawer(false)}
+              aria-hidden="true"
+            />
+          )}
         </div>
       </section>
     </main>
@@ -1502,12 +1819,18 @@ function App() {
     {selectedImage ? (
       <ImageLightbox
         image={selectedImage}
+        gallery={selectedImageGallery.length ? selectedImageGallery : [selectedImage]}
         zoomMode={imageZoomMode}
         onZoomModeChange={setImageZoomMode}
-        onClose={() => setSelectedImage(null)}
+        onSelect={(next) => setSelectedImage(next)}
+        onClose={() => {
+          setSelectedImage(null);
+          setSelectedImageGallery([]);
+        }}
         t={t}
       />
     ) : null}
+    <ToastContainer toasts={toasts} />
     </>
   );
 }
@@ -1564,27 +1887,37 @@ function ActivityRail({
   activeTab,
   sessions,
   activeSessionId,
+  eventSessionId,
+  eventSessionPickerOpen,
   eventGroups,
   currentEventId,
   onTabChange,
   onNewSession,
   onOpenSession,
   onDeleteSession,
-  onOpenRound,
+  onOpenEventSession,
+  onToggleEventSessionPicker,
+  onDeleteRoundLogs,
   t,
 }: {
   activeTab: ActivityTab;
   sessions: ChatSessionSummary[];
   activeSessionId: string | null;
+  eventSessionId: string | null;
+  eventSessionPickerOpen: boolean;
   eventGroups: EventGroup[];
   currentEventId?: string;
   onTabChange: (tab: ActivityTab) => void;
   onNewSession: () => void;
   onOpenSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
-  onOpenRound: (messageId: string) => void;
+  onOpenEventSession: (id: string) => void;
+  onToggleEventSessionPicker: () => void;
+  onDeleteRoundLogs: (messageId: string) => void;
   t: typeof TRANSLATIONS.en;
 }) {
+  const selectedEventSession = sessions.find((session) => session.id === eventSessionId) ?? sessions[0] ?? null;
+
   return (
     <aside className="activity-rail" aria-label={`${t.chatSessions} and ${t.eventHistory}`}>
       <div className="activity-tabs" role="tablist">
@@ -1618,7 +1951,7 @@ function ActivityRail({
           </button>
           <div className="session-list">
             {sessions.length === 0 ? (
-              <p className="empty-event">{t.noSessions}</p>
+              <p className="empty-event">{t.noEvents}</p>
             ) : (
               sessions.map((session) => (
                 <article className={`session-row ${session.id === activeSessionId ? "active" : ""}`} key={session.id}>
@@ -1647,19 +1980,65 @@ function ActivityRail({
         </section>
       ) : (
         <section className="activity-panel" aria-label={t.eventHistory}>
-          <div className="event-list">
-            {eventGroups.length === 0 ? (
-              <p className="empty-event">{t.noEvents}</p>
-            ) : (
-              eventGroups.map((group) => (
-                <RoundEventGroup
-                  key={group.messageId}
-                  group={group}
-                  currentEventId={currentEventId}
-                  onOpen={() => onOpenRound(group.messageId)}
-                  t={t}
-                />
-              ))
+          <div className={`event-session-container ${eventSessionPickerOpen ? "picker-open" : ""}`}>
+            <div className={`event-session-dropdown ${eventSessionPickerOpen ? "open" : ""}`} aria-label={t.eventSession}>
+              {selectedEventSession ? (
+                <button
+                  type="button"
+                  className="event-session-trigger"
+                  onClick={onToggleEventSessionPicker}
+                  aria-expanded={eventSessionPickerOpen}
+                >
+                  <span>
+                    <strong>{selectedEventSession.title}</strong>
+                    <small>
+                      {t.messageCount(selectedEventSession.message_count)} · {t.eventCount(selectedEventSession.event_count)}
+                    </small>
+                  </span>
+                  <em>{selectedEventSession.event_count}</em>
+                  <ChevronDown size={14} />
+                </button>
+              ) : (
+                <p className="empty-event">{t.noEvents}</p>
+              )}
+              {eventSessionPickerOpen && sessions.filter((s) => s.id !== eventSessionId).length > 0 ? (
+                <div className="event-session-menu">
+                  {sessions
+                    .filter((session) => session.id !== eventSessionId)
+                    .map((session) => (
+                      <button
+                        type="button"
+                        key={session.id}
+                        onClick={() => onOpenEventSession(session.id)}
+                        title={session.title}
+                      >
+                        <span>
+                          <strong>{session.title}</strong>
+                          <small>
+                            {t.messageCount(session.message_count)} · {t.eventCount(session.event_count)}
+                          </small>
+                        </span>
+                      </button>
+                    ))}
+                </div>
+              ) : null}
+            </div>
+            {!eventSessionPickerOpen && (
+              <div className="event-list">
+                {eventGroups.length === 0 ? (
+                  <p className="empty-event">{t.noEvents}</p>
+                ) : (
+                  eventGroups.map((group) => (
+                    <RoundEventGroup
+                      key={group.messageId}
+                      group={group}
+                      currentEventId={currentEventId}
+                      onDelete={() => onDeleteRoundLogs(group.messageId)}
+                      t={t}
+                    />
+                  ))
+                )}
+              </div>
             )}
           </div>
         </section>
@@ -1685,6 +2064,7 @@ function ChatWorkspace({
   isListening,
   voiceMessage,
   bottomRef,
+  messageListRef,
   onInputChange,
   onKeyDown,
   onSubmit,
@@ -1701,6 +2081,9 @@ function ChatWorkspace({
   onToggleVoiceInput,
   onViewImage,
   onOpenEvents,
+  onGenerateImages,
+  onRetry,
+  visualizingMessageIds,
   t,
 }: {
   messages: Message[];
@@ -1719,6 +2102,7 @@ function ChatWorkspace({
   isListening: boolean;
   voiceMessage: string;
   bottomRef: React.RefObject<HTMLDivElement | null>;
+  messageListRef: React.RefObject<HTMLDivElement | null>;
   onInputChange: (value: string) => void;
   onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -1733,27 +2117,27 @@ function ChatWorkspace({
   onSaveOpenAIKey: () => void;
   onOpenSkills: () => void;
   onToggleVoiceInput: () => void;
-  onViewImage: (image: GeneratedImage) => void;
+  onViewImage: (image: GeneratedImage, gallery: GeneratedImage[]) => void;
   onOpenEvents: (messageId: string) => void;
+  onGenerateImages: (message: Message) => void;
+  onRetry: (message: Message) => void;
+  visualizingMessageIds: string[];
   t: typeof TRANSLATIONS.en;
 }) {
   return (
     <section className="chat-workspace" aria-label="Chat conversation">
-      <div className="message-list">
-        {messages.map((message) => (
-          <article key={message.id} className={`message ${message.role}`}>
-            <span className="role-label">{message.role}</span>
-            {visibleMessageContent(message, isStreaming) ? <p>{visibleMessageContent(message, isStreaming)}</p> : null}
-            {message.activities?.length ? (
-              <ActivityStrip message={message} onOpenEvents={() => onOpenEvents(message.id)} t={t} />
-            ) : null}
-            {message.images?.length ? (
-              <ImageArtifactGallery images={message.images} onViewImage={onViewImage} t={t} />
-            ) : null}
-          </article>
-        ))}
-        <div ref={bottomRef} />
-      </div>
+      <MessageList
+        messages={messages}
+        isStreaming={isStreaming}
+        bottomRef={bottomRef}
+        messageListRef={messageListRef}
+        onOpenEvents={onOpenEvents}
+        onViewImage={onViewImage}
+        onGenerateImages={onGenerateImages}
+        onRetry={onRetry}
+        visualizingMessageIds={visualizingMessageIds}
+        t={t}
+      />
 
       {(showTutorial || shouldShowStarters) && (
         <section className={`starter-area ${showTutorial ? "with-tutorial" : ""}`} aria-label="Getting started">
@@ -1806,6 +2190,164 @@ function ChatWorkspace({
   );
 }
 
+function MessageList({
+  messages,
+  isStreaming,
+  bottomRef,
+  messageListRef,
+  onOpenEvents,
+  onViewImage,
+  onGenerateImages,
+  onRetry,
+  visualizingMessageIds,
+  t,
+}: {
+  messages: Message[];
+  isStreaming: boolean;
+  bottomRef: React.RefObject<HTMLDivElement | null>;
+  messageListRef: React.RefObject<HTMLDivElement | null>;
+  onOpenEvents: (messageId: string) => void;
+  onViewImage: (image: GeneratedImage, gallery: GeneratedImage[]) => void;
+  onGenerateImages: (message: Message) => void;
+  onRetry: (message: Message) => void;
+  visualizingMessageIds: string[];
+  t: typeof TRANSLATIONS.en;
+}) {
+  const [showScrollButton, setShowScrollButton] = useState(false);
+
+  const handleScroll = useCallback(() => {
+    const el = messageListRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setShowScrollButton(distanceFromBottom > 120);
+  }, [messageListRef]);
+
+  useEffect(() => {
+    const el = messageListRef.current;
+    if (!el) return;
+    el.addEventListener("scroll", handleScroll, { passive: true });
+    return () => el.removeEventListener("scroll", handleScroll);
+  }, [handleScroll, messageListRef]);
+
+  const scrollToBottom = () => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  };
+
+  return (
+    <div className="message-list" ref={messageListRef}>
+      {messages.map((message) => (
+        <MessageBubble
+          key={message.id}
+          message={message}
+          isStreaming={isStreaming}
+          onOpenEvents={() => onOpenEvents(message.id)}
+          onViewImage={onViewImage}
+          onGenerateImages={() => onGenerateImages(message)}
+          onRetry={() => onRetry(message)}
+          isGenerating={visualizingMessageIds.includes(message.id)}
+          t={t}
+        />
+      ))}
+      <div ref={bottomRef} />
+      {showScrollButton && (
+        <button
+          type="button"
+          className="scroll-to-bottom"
+          onClick={scrollToBottom}
+          aria-label={t.scrollToBottom}
+          title={t.scrollToBottom}
+        >
+          <ArrowDown size={16} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function MessageBubble({
+  message,
+  isStreaming,
+  onOpenEvents,
+  onViewImage,
+  onGenerateImages,
+  onRetry,
+  isGenerating,
+  t,
+}: {
+  message: Message;
+  isStreaming: boolean;
+  onOpenEvents: () => void;
+  onViewImage: (image: GeneratedImage, gallery: GeneratedImage[]) => void;
+  onGenerateImages: () => void;
+  onRetry: () => void;
+  isGenerating: boolean;
+  t: typeof TRANSLATIONS.en;
+}) {
+  const [copied, setCopied] = useState(false);
+  const content = visibleMessageContent(message, isStreaming);
+  const roleLabel = message.role === "user" ? t.roleYou : t.roleAssistant;
+
+  const handleCopy = async () => {
+    if (!message.content.trim()) return;
+    await navigator.clipboard.writeText(message.content);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <article className={`message ${message.role} ${message.errored ? "errored" : ""}`}>
+      <div className="message-header">
+        <span className="role-label">{roleLabel}</span>
+        {message.content.trim() && (
+          <div className="message-actions">
+            {message.role === "assistant" && message.errored && message.sourcePrompt && (
+              <button
+                type="button"
+                className="message-action-button message-retry-button"
+                onClick={onRetry}
+                aria-label={t.retry}
+                title={t.retry}
+              >
+                <RefreshCw size={13} />
+              </button>
+            )}
+            <button
+              type="button"
+              className={`message-action-button ${copied ? "copied" : ""}`}
+              onClick={handleCopy}
+              aria-label={t.copyMessage}
+              title={t.copyMessage}
+            >
+              {copied ? <CheckCircle2 size={13} /> : <Copy size={13} />}
+            </button>
+          </div>
+        )}
+      </div>
+      {content ? (
+        message.role === "assistant" ? (
+          <div className="message-markdown">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{normalizeMarkdown(content)}</ReactMarkdown>
+          </div>
+        ) : (
+          <p>{content}</p>
+        )
+      ) : null}
+      {message.activities?.length && !message.content.trim() && !message.activitiesComplete ? (
+        <ActivityStrip message={message} onOpenEvents={onOpenEvents} t={t} />
+      ) : null}
+      {message.images?.length ? (
+        <ImageArtifactGallery images={message.images} onViewImage={onViewImage} t={t} />
+      ) : null}
+      <MessageVisualActions
+        message={message}
+        isGenerating={isGenerating}
+        onGenerateImages={onGenerateImages}
+        t={t}
+      />
+    </article>
+  );
+}
+
 function ActivityStrip({
   message,
   onOpenEvents,
@@ -1839,13 +2381,42 @@ function ActivityStrip({
   );
 }
 
+function MessageVisualActions({
+  message,
+  isGenerating,
+  onGenerateImages,
+  t,
+}: {
+  message: Message;
+  isGenerating: boolean;
+  onGenerateImages: () => void;
+  t: typeof TRANSLATIONS.en;
+}) {
+  if (message.role !== "assistant" || !message.content.trim() || message.content.trim() === TRANSLATIONS.en.assistantIntro) {
+    return null;
+  }
+  if (!message.requiredSkillIds?.length) {
+    return null;
+  }
+  const disabled = isGenerating || message.visualStatus === "generating";
+  return (
+    <div className="message-visual-actions">
+      <button type="button" onClick={onGenerateImages} disabled={disabled}>
+        {disabled ? <Loader2 className="spin" size={14} /> : <WandSparkles size={14} />}
+        {disabled ? t.generatingImages : t.generateImages}
+      </button>
+      <span>{message.requiredSkillsSnapshot?.map((skill) => skill.name).join(" · ") || t.noSavedRequiredSkills}</span>
+    </div>
+  );
+}
+
 function ImageArtifactGallery({
   images,
   onViewImage,
   t,
 }: {
   images: GeneratedImage[];
-  onViewImage: (image: GeneratedImage) => void;
+  onViewImage: (image: GeneratedImage, gallery: GeneratedImage[]) => void;
   t: typeof TRANSLATIONS.en;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -1869,7 +2440,7 @@ function ImageArtifactGallery({
         <button
           type="button"
           className="visual-gallery-preview"
-          onClick={() => selectedImage.imageUrl && onViewImage(selectedImage)}
+          onClick={() => selectedImage.imageUrl && onViewImage(selectedImage, images)}
           disabled={!selectedImage.imageUrl}
           aria-label={`${t.viewImage}: ${selectedImage.title}`}
         >
@@ -1884,7 +2455,7 @@ function ImageArtifactGallery({
           <span>{selectedImage.agent || t.managerAgent}</span>
           <p>{selectedImage.status === "loading" ? t.imageGenerating : selectedImage.description}</p>
           <div className="image-artifact-actions">
-            <button type="button" onClick={() => onViewImage(selectedImage)} disabled={!selectedImage.imageUrl}>
+            <button type="button" onClick={() => onViewImage(selectedImage, images)} disabled={!selectedImage.imageUrl}>
               <ZoomIn size={13} />
               {t.viewImage}
             </button>
@@ -2007,12 +2578,13 @@ function Composer({
         <div className="composer-tools">
           <button
             type="button"
-            className={`composer-icon-button compass-button ${showApiKeyPanel ? "open" : ""}`}
+            className={`composer-icon-button api-key-button ${showApiKeyPanel ? "open" : ""} ${!apiKeyConfigured ? "attention" : ""}`}
             aria-label={t.openApiSettings}
             aria-expanded={showApiKeyPanel}
             onClick={onToggleApiKeyPanel}
           >
-            <Compass size={18} />
+            <KeyRound size={17} />
+            {!apiKeyConfigured ? <span className="api-key-dot" aria-hidden="true" /> : null}
           </button>
           <button type="button" className="composer-mode-pill" onClick={onOpenSkills}>
             <ShieldCheck size={14} />
@@ -2165,6 +2737,14 @@ function SkillEditorModal({
   onSaveSkill: () => void;
   t: typeof TRANSLATIONS.en;
 }) {
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") onCancelEdit();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onCancelEdit]);
+
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onCancelEdit}>
       <section
@@ -2341,12 +2921,18 @@ function PromptSuggestions({
 
 function EventIcon({ type }: { type: string }) {
   if (type.includes("tool")) {
-    return <Wrench size={15} />;
+    return <Wrench size={15} className="event-icon-tool" />;
   }
   if (type.includes("reasoning")) {
-    return <Brain size={15} />;
+    return <Brain size={15} className="event-icon-reasoning" />;
   }
-  return <TerminalSquare size={15} />;
+  if (type.includes("error")) {
+    return <X size={15} className="event-icon-error" />;
+  }
+  if (type.includes("specialist") || type.includes("agent")) {
+    return <Server size={15} className="event-icon-agent" />;
+  }
+  return <TerminalSquare size={15} className="event-icon-default" />;
 }
 
 function EventCard({
@@ -2358,15 +2944,63 @@ function EventCard({
   roundLabel?: string;
   prominent?: boolean;
 }) {
+  const [showRaw, setShowRaw] = useState(false);
+  const typeClass = `event-type-${event.type.replace(/\s+/g, "_")}`;
+  const summary = event.detail.length > 120 ? event.detail.slice(0, 120) + "..." : event.detail;
+  const hasLongDetail = event.detail.length > 120;
+
   return (
-    <article className={`event-card ${prominent ? "prominent" : ""}`}>
-      <EventIcon type={event.type} />
-      <div>
-        <strong>{event.title}</strong>
-        <span>{roundLabel ? `${roundLabel} · ${event.type}` : event.type}</span>
-        <code>{event.detail}</code>
-      </div>
-    </article>
+    <>
+      <article className={`event-card ${typeClass} ${prominent ? "prominent" : ""}`}>
+        <EventIcon type={event.type} />
+        <div className="event-card-body">
+          <strong>{event.title}</strong>
+          <span>{roundLabel ? `${roundLabel} · ${event.type}` : event.type}</span>
+          {summary && <p className="event-card-summary">{summary}</p>}
+          {hasLongDetail && (
+            <button type="button" className="event-card-raw-button" onClick={() => setShowRaw(true)}>
+              View raw
+            </button>
+          )}
+        </div>
+      </article>
+      {showRaw && (
+        <EventDetailModal event={event} onClose={() => setShowRaw(false)} />
+      )}
+    </>
+  );
+}
+
+function EventDetailModal({ event, onClose }: { event: StreamEvent; onClose: () => void }) {
+  useEffect(() => {
+    const handleKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="event-detail-modal"
+        role="dialog"
+        aria-modal="true"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="event-detail-header">
+          <div>
+            <EventIcon type={event.type} />
+            <strong>{event.title}</strong>
+            <span className="event-detail-type">{event.type}</span>
+          </div>
+          <button type="button" className="modal-close-button" onClick={onClose} aria-label="Close">
+            <X size={18} />
+          </button>
+        </div>
+        <pre className="event-detail-code">{event.detail}</pre>
+      </section>
+    </div>
   );
 }
 
@@ -2374,40 +3008,66 @@ interface EventGroup {
   messageId: string;
   label: string;
   roundIndex: number;
+  userQuestion?: string;
   events: StreamEvent[];
 }
 
 function RoundEventGroup({
   group,
-  onOpen,
+  onDelete,
   currentEventId,
   t,
 }: {
   group: EventGroup;
-  onOpen: () => void;
+  onDelete: () => void;
   currentEventId?: string;
   t: typeof TRANSLATIONS.en;
 }) {
-  const latestEvent = group.events[group.events.length - 1];
+  const [isExpanded, setIsExpanded] = useState(false);
   const hasCurrentEvent = currentEventId ? group.events.some((event) => event.id === currentEventId) : false;
+  const displayLabel = group.userQuestion ?? group.label;
+
+  // Auto-expand when the current streaming event belongs to this round
+  useEffect(() => {
+    if (hasCurrentEvent) setIsExpanded(true);
+  }, [hasCurrentEvent]);
 
   return (
-    <button
-      className={`round-log-button ${hasCurrentEvent ? "active" : ""}`}
-      type="button"
-      onClick={onOpen}
-      aria-label={`${t.openRoundLogs}: ${group.label}`}
-    >
-      <span className="round-log-title">
-        <ChevronDown size={14} />
-        <strong>{group.label}</strong>
-        <em>{group.events.length}</em>
-      </span>
-      <span className="round-log-preview">
-        <small>{t.latestEvent}</small>
-        {latestEvent ? latestEvent.title : ""}
-      </span>
-    </button>
+    <article className={`round-log-row ${hasCurrentEvent ? "active" : ""} ${isExpanded ? "expanded" : ""}`}>
+      <button
+        className="round-log-button"
+        type="button"
+        onClick={() => setIsExpanded((v) => !v)}
+        aria-expanded={isExpanded}
+        aria-label={isExpanded ? t.collapse : t.expand}
+      >
+        <span className="round-log-title">
+          <ChevronDown size={14} className={isExpanded ? "rotated" : ""} />
+          <strong>{displayLabel}</strong>
+          <em>{group.events.length}</em>
+        </span>
+        {!isExpanded && (
+          <span className="round-log-preview">
+            <small>{group.label}</small>
+          </span>
+        )}
+      </button>
+      <button type="button" className="delete-round-button" onClick={onDelete} aria-label={`${t.deleteRoundLogs}: ${group.label}`}>
+        <Trash2 size={13} />
+      </button>
+      {isExpanded && (
+        <div className="round-log-events">
+          {group.events.map((event) => (
+            <EventCard
+              key={event.id}
+              event={event}
+              roundLabel={group.label}
+              prominent={event.id === currentEventId}
+            />
+          ))}
+        </div>
+      )}
+    </article>
   );
 }
 
@@ -2422,6 +3082,14 @@ function RoundLogModal({
   onClose: () => void;
   t: typeof TRANSLATIONS.en;
 }) {
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <section
@@ -2461,17 +3129,47 @@ function RoundLogModal({
 
 function ImageLightbox({
   image,
+  gallery,
   zoomMode,
   onZoomModeChange,
+  onSelect,
   onClose,
   t,
 }: {
   image: GeneratedImage;
+  gallery: GeneratedImage[];
   zoomMode: ImageZoomMode;
   onZoomModeChange: (mode: ImageZoomMode) => void;
+  onSelect: (next: GeneratedImage) => void;
   onClose: () => void;
   t: typeof TRANSLATIONS.en;
 }) {
+  const navigableGallery = gallery.filter((item) => item.imageUrl);
+  const currentIndex = navigableGallery.findIndex((item) => item.id === image.id);
+  const hasMultiple = navigableGallery.length > 1;
+
+  const goPrev = useCallback(() => {
+    if (!hasMultiple || currentIndex < 0) return;
+    const prevIndex = (currentIndex - 1 + navigableGallery.length) % navigableGallery.length;
+    onSelect(navigableGallery[prevIndex]);
+  }, [hasMultiple, currentIndex, navigableGallery, onSelect]);
+
+  const goNext = useCallback(() => {
+    if (!hasMultiple || currentIndex < 0) return;
+    const nextIndex = (currentIndex + 1) % navigableGallery.length;
+    onSelect(navigableGallery[nextIndex]);
+  }, [hasMultiple, currentIndex, navigableGallery, onSelect]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+      if (event.key === "ArrowLeft") goPrev();
+      if (event.key === "ArrowRight") goNext();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onClose, goPrev, goNext]);
+
   if (!image.imageUrl) {
     return null;
   }
@@ -2517,6 +3215,29 @@ function ImageLightbox({
         </div>
         <div className="image-lightbox-canvas" data-zoom={zoomMode}>
           <img src={image.imageUrl} alt={image.title} />
+          {hasMultiple && (
+            <>
+              <button
+                type="button"
+                className="image-lightbox-nav prev"
+                onClick={goPrev}
+                aria-label={t.prev}
+              >
+                <ChevronLeft size={22} />
+              </button>
+              <button
+                type="button"
+                className="image-lightbox-nav next"
+                onClick={goNext}
+                aria-label={t.next}
+              >
+                <ChevronRight size={22} />
+              </button>
+              <div className="image-lightbox-counter">
+                {currentIndex + 1} / {navigableGallery.length}
+              </div>
+            </>
+          )}
         </div>
         {image.description ? <p className="image-lightbox-description">{image.description}</p> : null}
       </section>
@@ -2533,6 +3254,19 @@ function roundLabel(messageId: string, messages: Message[]): string {
   return `Round ${index}`;
 }
 
+function userQuestionForAssistant(messageId: string, messages: Message[]): string | undefined {
+  const assistantIdx = messages.findIndex((m) => m.id === messageId && m.role === "assistant");
+  if (assistantIdx <= 0) return undefined;
+  // Walk backwards to find the most recent user message preceding this assistant reply.
+  for (let i = assistantIdx - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "user" && m.content.trim()) {
+      return m.content.trim();
+    }
+  }
+  return undefined;
+}
+
 function groupedEvents(events: StreamEvent[], messages: Message[]): EventGroup[] {
   const groups: EventGroup[] = [];
   for (const event of [...events].sort((left, right) => left.order - right.order)) {
@@ -2544,6 +3278,7 @@ function groupedEvents(events: StreamEvent[], messages: Message[]): EventGroup[]
         messageId: event.messageId,
         label: roundLabel(event.messageId, messages),
         roundIndex: roundIndex(event.messageId, messages),
+        userQuestion: userQuestionForAssistant(event.messageId, messages),
         events: [event],
       });
     }
@@ -2605,6 +3340,31 @@ function sanitizeMessages(value: unknown, locale: Locale): Message[] {
       if (typeof candidate.activitiesComplete === "boolean") {
         message.activitiesComplete = candidate.activitiesComplete;
       }
+      if (typeof candidate.sourcePrompt === "string") {
+        message.sourcePrompt = candidate.sourcePrompt;
+      }
+      if (typeof candidate.stock === "string") {
+        message.stock = candidate.stock;
+      }
+      if (Array.isArray(candidate.requiredSkillIds)) {
+        message.requiredSkillIds = candidate.requiredSkillIds.filter((id): id is string => typeof id === "string");
+      }
+      if (Array.isArray(candidate.requiredSkillsSnapshot)) {
+        message.requiredSkillsSnapshot = candidate.requiredSkillsSnapshot
+          .filter((skill) => Boolean(skill && typeof skill === "object"))
+          .map((skill) => ({
+            id: typeof skill.id === "string" ? skill.id : "",
+            name: typeof skill.name === "string" ? skill.name : "",
+            description: typeof skill.description === "string" ? skill.description : "",
+          }))
+          .filter((skill) => skill.id && skill.name);
+      }
+      if (candidate.workflow === "chat" || candidate.workflow === "financial" || candidate.workflow === "agentic") {
+        message.workflow = candidate.workflow;
+      }
+      if (candidate.visualStatus === "generating" || candidate.visualStatus === "complete" || candidate.visualStatus === "error") {
+        message.visualStatus = candidate.visualStatus;
+      }
       return message;
     })
     .filter((message): message is Message => Boolean(message));
@@ -2665,7 +3425,13 @@ function endpointForWorkflow(workflow: Workflow): string {
   return workflow === "financial" ? "/api/financial-analysis/stream" : "/api/chat/stream";
 }
 
-function payloadForWorkflow(workflow: Workflow, prompt: string, messages: Message[], selectedSkillIds: string[]) {
+function payloadForWorkflow(
+  workflow: Workflow,
+  prompt: string,
+  messages: Message[],
+  selectedSkillIds: string[],
+  sessionId: string | null,
+) {
   if (workflow === "agentic") {
     return {
       prompt,
@@ -2673,6 +3439,7 @@ function payloadForWorkflow(workflow: Workflow, prompt: string, messages: Messag
       required_skill_ids: selectedSkillIds,
       stock: extractStockInput(prompt, messages),
       context: financialContext(messages),
+      session_id: sessionId,
     };
   }
 
@@ -2717,6 +3484,28 @@ function financialContext(messages: Message[]): string {
     .slice(-6)
     .map((message) => `${message.role.toUpperCase()}: ${message.content}`)
     .join("\n\n");
+}
+
+function normalizeMarkdown(text: string): string {
+  // Fix common streaming-markdown issues that break GFM rendering:
+  // 1. Insert a blank line before a table row that immediately follows
+  //    a non-blank, non-table line (tables need a preceding blank line).
+  // 2. Insert a blank line after a heading that's immediately followed by content.
+  const lines = text.split("\n");
+  const out: string[] = [];
+  const tableRowRe = /^\s*\|.*\|\s*$/;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const prev = i > 0 ? lines[i - 1] : "";
+    if (tableRowRe.test(line) && prev.trim() && !tableRowRe.test(prev)) {
+      if (out[out.length - 1]?.trim() !== "") out.push("");
+    }
+    out.push(line);
+    if (/^#{1,6}\s/.test(line) && i + 1 < lines.length && lines[i + 1].trim()) {
+      out.push("");
+    }
+  }
+  return out.join("\n");
 }
 
 function visibleMessageContent(message: Message, isStreaming: boolean): string {
@@ -2859,9 +3648,32 @@ async function readNdjsonStream(stream: ReadableStream<Uint8Array>, onPayload: (
 
 function summarize(value: unknown): string {
   if (typeof value === "string") {
+    // Try to pretty-print JSON strings so tool outputs are readable.
+    const trimmed = value.trim();
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+      try {
+        return JSON.stringify(JSON.parse(trimmed), null, 2);
+      } catch {
+        return value;
+      }
+    }
     return value;
   }
   return JSON.stringify(value, null, 2);
+}
+
+function ToastContainer({ toasts }: { toasts: { id: string; message: string; type: "success" | "error" }[] }) {
+  if (toasts.length === 0) return null;
+  return (
+    <div className="toast-container" aria-live="polite">
+      {toasts.map((toast) => (
+        <div key={toast.id} className={`toast toast-${toast.type}`}>
+          {toast.type === "success" ? <CheckCircle2 size={14} /> : <X size={14} />}
+          <span>{toast.message}</span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 createRoot(document.getElementById("root")!).render(

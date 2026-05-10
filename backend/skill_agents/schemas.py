@@ -38,6 +38,7 @@ class AgenticTaskRequest(BaseModel):
     required_skill_ids: list[str] = Field(default_factory=list, max_length=MAX_SELECTED_SKILLS)
     stock: str | None = None
     context: str | None = None
+    session_id: str | None = None
 
     @model_validator(mode="after")
     def normalize_required_skills(self) -> "AgenticTaskRequest":
@@ -54,6 +55,21 @@ class SkillDraftRequest(BaseModel):
 
 class SkillDraftResponse(SkillBase):
     pass
+
+
+class VisualizationRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+    answer: str = Field(..., min_length=1)
+    required_skill_ids: list[str] = Field(..., min_length=1, max_length=MAX_SELECTED_SKILLS)
+    stock: str | None = None
+    context: str | None = None
+    session_id: str | None = None
+    message_id: str | None = None
+
+    @model_validator(mode="after")
+    def dedupe_required_skills(self) -> "VisualizationRequest":
+        self.required_skill_ids = list(dict.fromkeys(self.required_skill_ids))
+        return self
 
 
 class ChatSessionBase(BaseModel):
