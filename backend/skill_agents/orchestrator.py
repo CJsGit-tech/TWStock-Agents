@@ -5,7 +5,7 @@ import json
 import os
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass
 from typing import Any
 
 from agents import Agent, ImageGenerationTool, ModelSettings, Runner, WebSearchTool
@@ -20,6 +20,7 @@ from openai.types.responses import (
 from financial_agents.orchestrator import _extract_image_payloads, _stringify_output
 from financial_agents.schemas import DISCLAIMER
 from agent_tracing import run_config, trace_url
+from utils import to_jsonable
 
 from .models import Skill
 
@@ -33,7 +34,6 @@ class SpecialistResult:
     skill_name: str
     output: str
     error: str | None = None
-    image_count: int = 0
 
 
 @dataclass
@@ -99,22 +99,6 @@ def build_specialist_agent(skill: Skill, mcp_servers: list[MCPServer]) -> Agent:
         mcp_servers=mcp_servers,
     )
 
-
-def build_manager_agent(mcp_servers: list[MCPServer]) -> Agent:
-    return Agent(
-        name="ManagerAgent",
-        instructions=(
-            "你是投資分析任務的 Manager Agent。你會收到多個 specialist agent 的 Markdown 分析。"
-            "請整合成單一繁體中文 Markdown 最終答案。"
-            "要求：比較不同 specialist 的結論、指出衝突或資料缺口、保留重要來源與假設、"
-            "給出清楚但謹慎的結論。不要逐字貼回所有 specialist 內容。"
-            f"若內容涉及投資建議，最後加入：「{DISCLAIMER}」"
-        ),
-        model=agentic_model(),
-        model_settings=_model_settings(),
-        tools=_builtin_tools(),
-        mcp_servers=mcp_servers,
-    )
 
 
 def build_planner_agent(mcp_servers: list[MCPServer]) -> Agent:
@@ -198,7 +182,7 @@ async def run_agentic_task(
     """Run the agentic task workflow.
 
     Three workflows, all sharing a single trace_id under the top-level
-    `workflow_trace("Agentic task")` created in app.py:
+    `trace("Agentic task")` created in app.py:
 
     - WF1: user selected skills → run exactly those in parallel.
     - WF2: no skills selected, no chat session → run ALL active skills in parallel.
@@ -482,7 +466,7 @@ async def _run_specialist(
 
     text_parts: list[str] = []
     async for event in result.stream_events():
-        async for normalized in _normalize_agent_event(event, skill):
+        async for normalized in _normalize_event(event, skill=skill):
             if normalized["type"] == "text_delta":
                 text_parts.append(normalized["payload"]["delta"])
             # Forward every event (including text_delta) to the queue so the
@@ -530,7 +514,7 @@ async def _plan_skill_execution(
     )
     text_parts: list[str] = []
     async for event in result.stream_events():
-        async for normalized in _normalize_common_event(event):
+        async for normalized in _normalize_event(event):
             if normalized["type"] == "text_delta":
                 text_parts.append(normalized["payload"]["delta"])
 
@@ -593,40 +577,6 @@ def _required_only_plan(required_skills: list[Skill]) -> SkillExecutionPlan:
     )
 
 
-async def _run_manager(
-    prompt: str,
-    results: list[SpecialistResult],
-    mcp_servers: list[MCPServer],
-    stock: str | None = None,
-    context: str | None = None,
-    trace_id: str | None = None,
-    trace_metadata: dict[str, Any] | None = None,
-) -> AsyncIterator[dict[str, Any]]:
-    manager = build_manager_agent(mcp_servers)
-    manager_prompt = _manager_prompt(prompt, results, stock=stock, context=context)
-    metadata = {
-        **(trace_metadata or {}),
-        "agent": "ManagerAgent",
-        "stock": stock,
-        "workflow": "Manager synthesis",
-    }
-    result = Runner.run_streamed(
-        manager,
-        input=manager_prompt,
-        max_turns=8,
-        run_config=run_config("Manager synthesis", trace_id=trace_id, group_id=stock, metadata=metadata),
-    )
-    async for event in result.stream_events():
-        async for normalized in _normalize_manager_event(event, "ManagerAgent"):
-            yield normalized
-    yield {
-        "type": "manager_completed",
-        "payload": {
-            "agent": "ManagerAgent",
-            "summary": "Final synthesis completed",
-        },
-    }
-
 
 async def _run_research_manager(
     prompt: str,
@@ -650,7 +600,7 @@ async def _run_research_manager(
         run_config=run_config("Manager research", trace_id=trace_id, group_id=stock, metadata=metadata),
     )
     async for event in result.stream_events():
-        async for normalized in _normalize_manager_event(event, "ManagerResearchAgent"):
+        async for normalized in _normalize_event(event, agent_name="ManagerResearchAgent"):
             yield normalized
     yield {
         "type": "manager_completed",
@@ -682,7 +632,7 @@ async def build_skill_draft(
     )
     text_parts: list[str] = []
     async for event in result.stream_events():
-        async for normalized in _normalize_common_event(event):
+        async for normalized in _normalize_event(event):
             if normalized["type"] == "text_delta":
                 text_parts.append(normalized["payload"]["delta"])
 
@@ -882,25 +832,6 @@ def _specialist_prompt(prompt: str, skill: Skill, stock: str | None = None, cont
     return "\n\n".join(parts)
 
 
-def _manager_prompt(
-    prompt: str,
-    results: list[SpecialistResult],
-    stock: str | None = None,
-    context: str | None = None,
-) -> str:
-    specialist_blocks = "\n\n".join(
-        f"## Specialist: {result.skill_name}\n{result.output}" for result in results
-    )
-    parts = [
-        f"使用者任務：{prompt}",
-    ]
-    if stock:
-        parts.append(f"股票：{stock}")
-    if context:
-        parts.append(f"先前對話摘要：\n{context[-3000:]}")
-    parts.append(f"Specialist outputs:\n\n{specialist_blocks}")
-    return "\n\n".join(parts)
-
 
 def _research_prompt(prompt: str, stock: str | None = None, context: str | None = None) -> str:
     parts = [f"使用者任務：{prompt}"]
@@ -918,58 +849,50 @@ def _skill_draft_prompt(prompt: str, context: str | None = None) -> str:
     return "\n\n".join(parts)
 
 
-async def _normalize_agent_event(event: Any, skill: Skill) -> AsyncIterator[dict[str, Any]]:
-    async for normalized in _normalize_common_event(event):
-        normalized["payload"]["agent"] = skill.name
-        normalized["payload"]["skill_id"] = skill.id
-        yield normalized
+async def _normalize_event(
+    event: Any,
+    *,
+    agent_name: str | None = None,
+    skill: Skill | None = None,
+) -> AsyncIterator[dict[str, Any]]:
+    """Normalize an SDK stream event into our NDJSON contract.
 
-
-async def _normalize_manager_event(event: Any, agent_name: str = "ManagerAgent") -> AsyncIterator[dict[str, Any]]:
-    async for normalized in _normalize_common_event(event):
-        normalized["payload"]["agent"] = agent_name
-        yield normalized
-
-
-async def _normalize_common_event(event: Any) -> AsyncIterator[dict[str, Any]]:
+    Optionally tags the payload with agent_name and/or skill metadata.
+    """
     if event.type == "raw_response_event":
         data = event.data
         if isinstance(data, ResponseTextDeltaEvent):
             yield {"type": "text_delta", "payload": {"delta": data.delta}}
             return
-
         if isinstance(data, (ResponseReasoningTextDeltaEvent, ResponseReasoningSummaryTextDeltaEvent)):
             yield {"type": "reasoning_delta", "payload": {"delta": data.delta}}
             return
-
         event_type = getattr(data, "type", data.__class__.__name__)
         if "reasoning" in event_type:
-            yield {
-                "type": "reasoning_event",
-                "payload": {"event_type": event_type, "data": _to_jsonable(data)},
-            }
+            yield {"type": "reasoning_event", "payload": {"event_type": event_type, "data": to_jsonable(data)}}
         return
 
     if event.type == "run_item_stream_event":
         if "reasoning" in event.name:
-            yield {
-                "type": "reasoning_event",
-                "payload": {"event_type": event.name, "item": _to_jsonable(event.item)},
-            }
+            yield {"type": "reasoning_event", "payload": {"event_type": event.name, "item": to_jsonable(event.item)}}
             return
-
         if event.name == "tool_called" and isinstance(event.item, ToolCallItem):
-            yield {
-                "type": "tool_called",
-                "payload": {"item": _to_jsonable(event.item.raw_item)},
-            }
+            payload: dict[str, Any] = {"item": to_jsonable(event.item.raw_item)}
+            if agent_name:
+                payload["agent"] = agent_name
+            if skill:
+                payload["agent"] = skill.name
+                payload["skill_id"] = skill.id
+            yield {"type": "tool_called", "payload": payload}
             return
-
         if event.name == "tool_output" and isinstance(event.item, ToolCallOutputItem):
-            yield {
-                "type": "tool_output",
-                "payload": {"output": _to_jsonable(event.item.output)},
-            }
+            payload = {"output": to_jsonable(event.item.output)}
+            if agent_name:
+                payload["agent"] = agent_name
+            if skill:
+                payload["agent"] = skill.name
+                payload["skill_id"] = skill.id
+            yield {"type": "tool_output", "payload": payload}
             return
 
 
@@ -998,18 +921,3 @@ def _extract_json_object(value: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _to_jsonable(value: Any) -> Any:
-    if hasattr(value, "model_dump"):
-        try:
-            return value.model_dump(mode="json")
-        except Exception:
-            return str(value)
-    if is_dataclass(value) and not isinstance(value, type):
-        return {field.name: _to_jsonable(getattr(value, field.name)) for field in fields(value)}
-    if isinstance(value, dict):
-        return {str(key): _to_jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_to_jsonable(item) for item in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    return str(value)

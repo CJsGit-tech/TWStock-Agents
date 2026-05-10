@@ -21,7 +21,6 @@ import os
 import re
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import fields, is_dataclass
 from typing import Any
 
 from agents import Runner
@@ -36,6 +35,7 @@ from openai.types.responses import (
 from .agents import financial_analysis_agent, financial_visualization_agent
 from .schemas import SpecialistResult, normalize_stock_input
 from agent_tracing import run_config, trace_url
+from utils import to_jsonable
 
 # ---------------------------------------------------------------------------
 # Visualization detection
@@ -267,7 +267,7 @@ async def _normalize_agent_event(event: Any) -> AsyncIterator[dict[str, Any]]:
         if "reasoning" in event_type:
             yield {
                 "type": "reasoning_event",
-                "payload": {"event_type": event_type, "data": _to_jsonable(data)},
+                "payload": {"event_type": event_type, "data": to_jsonable(data)},
             }
         return
 
@@ -275,21 +275,21 @@ async def _normalize_agent_event(event: Any) -> AsyncIterator[dict[str, Any]]:
         if "reasoning" in event.name:
             yield {
                 "type": "reasoning_event",
-                "payload": {"event_type": event.name, "item": _to_jsonable(event.item)},
+                "payload": {"event_type": event.name, "item": to_jsonable(event.item)},
             }
             return
 
         if event.name == "tool_called" and isinstance(event.item, ToolCallItem):
             yield {
                 "type": "tool_called",
-                "payload": {"item": _to_jsonable(event.item.raw_item)},
+                "payload": {"item": to_jsonable(event.item.raw_item)},
             }
             return
 
         if event.name == "tool_output" and isinstance(event.item, ToolCallOutputItem):
             yield {
                 "type": "tool_output",
-                "payload": {"output": _to_jsonable(event.item.output)},
+                "payload": {"output": to_jsonable(event.item.output)},
             }
             return
 
@@ -319,7 +319,7 @@ def _stringify_output(value: Any) -> str:
         return value
     if hasattr(value, "model_dump"):
         return json.dumps(value.model_dump(mode="json"), ensure_ascii=False, indent=2)
-    return json.dumps(_to_jsonable(value), ensure_ascii=False, indent=2)
+    return json.dumps(to_jsonable(value), ensure_ascii=False, indent=2)
 
 
 def _extract_image_payload(result: Any) -> dict[str, Any] | None:
@@ -371,7 +371,7 @@ def _extract_image_payloads(result: Any) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
     seen: set[str] = set()
     for surface in surfaces:
-        jsonable = _to_jsonable(surface)
+        jsonable = to_jsonable(surface)
         for b64 in _find_image_generation_results(jsonable):
             if b64 in seen:
                 continue
@@ -429,18 +429,3 @@ def _find_image_generation_results(value: Any) -> list[str]:
     return results
 
 
-def _to_jsonable(value: Any) -> Any:
-    if hasattr(value, "model_dump"):
-        try:
-            return value.model_dump(mode="json")
-        except Exception:
-            return str(value)
-    if is_dataclass(value) and not isinstance(value, type):
-        return {field.name: _to_jsonable(getattr(value, field.name)) for field in fields(value)}
-    if isinstance(value, dict):
-        return {str(key): _to_jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_to_jsonable(item) for item in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    return str(value)

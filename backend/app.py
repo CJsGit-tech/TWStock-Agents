@@ -5,10 +5,9 @@ import os
 import traceback
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
-from dataclasses import fields, is_dataclass
 from typing import Any, Literal
 
-from agents import Agent, ModelSettings, Runner
+from agents import Agent, ModelSettings, Runner, trace
 from agents.items import ToolCallItem, ToolCallOutputItem
 from agents.mcp import MCPServerStreamableHttp
 from dotenv import load_dotenv
@@ -24,6 +23,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+from agent_tracing import configure_tracing_api_key, flush_trace_exports, new_trace_id, run_config, trace_url
+from utils import to_jsonable
 
 from financial_agents import FinancialAnalysisRequest, run_financial_analysis
 from skill_agents import (
@@ -44,18 +46,8 @@ from skill_agents import (
 )
 from skill_agents.db import get_session, initialize_database
 from skill_agents.models import ChatSession, Skill
-from agent_tracing import (
-    configure_tracing,
-    configure_tracing_api_key,
-    flush_trace_exports,
-    new_trace_id,
-    run_config,
-    trace_url,
-    workflow_trace,
-)
 
 load_dotenv()
-configure_tracing()
 if os.getenv("OPENAI_API_KEY"):
     configure_tracing_api_key(os.environ["OPENAI_API_KEY"])
 
@@ -269,7 +261,7 @@ async def draft_skill(payload: SkillDraftRequest) -> dict[str, str]:
         metadata = {"endpoint": "/api/skills/draft", "workflow": "Skill prompt builder"}
         async with AsyncExitStack() as stack:
             mcp_servers = [await stack.enter_async_context(server) for server in build_mcp_servers()]
-            with workflow_trace("Skill prompt builder", trace_id=trace_id, metadata=metadata):
+            with trace("Skill prompt builder", trace_id=trace_id, metadata=metadata):
                 return await build_skill_draft(
                     payload.prompt,
                     mcp_servers,
@@ -391,7 +383,7 @@ async def stream_agent_events(messages: list[ChatMessage]) -> AsyncIterator[str]
     )
 
     try:
-        with workflow_trace("MCP chat", trace_id=trace_id, metadata=trace_metadata):
+        with trace("MCP chat", trace_id=trace_id, metadata=trace_metadata):
             async with AsyncExitStack() as stack:
                 mcp_servers = [await stack.enter_async_context(server) for server in build_mcp_servers()]
                 for server in mcp_servers:
@@ -474,7 +466,7 @@ async def stream_financial_analysis_events(
     )
 
     try:
-        with workflow_trace(
+        with trace(
             "Financial analysis",
             trace_id=trace_id,
             group_id=stock,
@@ -544,7 +536,7 @@ async def stream_agentic_task_events(
     )
 
     try:
-        with workflow_trace(
+        with trace(
             "Agentic task",
             trace_id=trace_id,
             group_id=request.stock,
@@ -617,7 +609,7 @@ async def stream_visualization_events(
     )
 
     try:
-        with workflow_trace(
+        with trace(
             "Skill visualizations",
             trace_id=trace_id,
             group_id=request.stock or request.session_id,
@@ -739,20 +731,3 @@ def conversation_prompt(messages: list[ChatMessage]) -> str:
 
 def encode_event(event_type: str, payload: dict[str, Any]) -> str:
     return json.dumps({"type": event_type, **payload}, ensure_ascii=False) + "\n"
-
-
-def to_jsonable(value: Any) -> Any:
-    if hasattr(value, "model_dump"):
-        try:
-            return value.model_dump(mode="json")
-        except Exception:
-            return str(value)
-    if is_dataclass(value) and not isinstance(value, type):
-        return {field.name: to_jsonable(getattr(value, field.name)) for field in fields(value)}
-    if isinstance(value, dict):
-        return {str(key): to_jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [to_jsonable(item) for item in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    return str(value)
