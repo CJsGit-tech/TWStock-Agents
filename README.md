@@ -1,4 +1,4 @@
-# TWStock Agents TEST
+# TWSTORCK UPDATES
 
 Docker Compose app for MCP-backed arithmetic tools, Taiwan stock tools, and a streamlined financial-analysis workflow.
 
