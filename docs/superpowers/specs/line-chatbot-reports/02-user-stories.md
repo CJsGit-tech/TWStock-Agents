@@ -1,74 +1,72 @@
 # 02. User Stories
 
-These user stories are meant to help check whether the implementation objective matches the desired outcome.
+These user stories check whether the implementation objective matches the desired v1 outcome.
 
-## Access And Registration
+## Constrained LINE Input
 
-As an admin, I want to register who can use the LINE bot, so that private portfolio or report functionality is not available to unknown LINE users.
-
-Acceptance criteria:
-
-- Unknown LINE users cannot trigger chatbot or report generation.
-- Unknown LINE users receive a short account-linking or access-denied message.
-- Active LINE users can use the bot.
-- Blocked LINE users cannot use the bot even if they were previously linked.
-
-## Invite-Code Linking
-
-As a user, I want to link my LINE account with an invite code, so that I can use the bot without needing a full web login flow.
+As a user, I want to request a report by sending only a stock name or stock number and my email address, so that I can receive the result without learning commands.
 
 Acceptance criteria:
 
-- User can send a command such as `link ABC123`.
-- Backend validates the invite code.
-- Backend stores the LINE user ID and links it to an internal app user or portfolio.
-- Used or expired invite codes cannot be reused.
-- The user receives a clear success or failure message.
+- Valid examples include `2330 user@example.com` and `台積電 user@example.com`.
+- Messages without an email address are rejected.
+- Messages without a stock name or stock number are rejected.
+- Extra open-ended prompts are not processed as chatbot requests.
+- LINE replies with a short format instruction when input is invalid.
 
-## Chat Through LINE
+## Email Report Request
 
-As a registered user, I want to ask questions in LINE, so that I can interact with the existing assistant without opening the web app.
-
-Acceptance criteria:
-
-- User sends a text message to the LINE Official Account.
-- Backend verifies the webhook came from LINE.
-- Backend checks the LINE user is active.
-- Backend converts the text into the current chatbot message format.
-- Backend calls the existing chatbot service.
-- Backend sends the final assistant answer back to LINE.
-
-## Portfolio-Aware Chat
-
-As a registered user with a linked portfolio, I want the LINE bot to understand my selected portfolio, so that it can answer portfolio-specific questions.
+As a user, I want the system to email the report to the address I provide, so that LINE is only used for submission and status.
 
 Acceptance criteria:
 
-- User account has a default portfolio or an explicit portfolio selection.
-- Chatbot request includes the linked `portfolio_id`.
-- Read-only portfolio tools can be used when helpful.
-- Portfolio mutation proposals still require approval and are not silently applied.
+- Backend validates email format before creating a report job.
+- Backend stores the submitted email with the report request.
+- Backend replies in LINE when the request is accepted.
+- Backend sends the generated report through SendGrid.
+- Backend logs whether the email send succeeded or failed.
 
-## Automatic Reports
+## AI HTML Report
 
-As a registered user, I want to receive scheduled reports in LINE, so that I can get portfolio or stock updates without manually asking.
-
-Acceptance criteria:
-
-- User can be subscribed to one or more report schedules.
-- Backend generates reports in the background.
-- Backend sends generated reports through LINE push messages.
-- Failed sends are logged and retried according to a defined policy.
-- User can be unsubscribed or blocked from future report delivery.
-
-## Report Presentation
-
-As a user, I want reports to be readable inside LINE, so that I can quickly understand the result on mobile.
+As a user, I want the email to be written and formatted by AI, so that the report is readable and useful in an email client.
 
 Acceptance criteria:
 
-- Version 1 can send plain text summaries.
-- Later versions can use Flex Messages for structured cards.
-- Large reports are split into multiple messages or linked to a generated artifact.
-- The message includes enough context to understand the report without opening the web app.
+- AI generates a subject line and HTML body.
+- The HTML email includes the requested stock identifier.
+- The report uses clear sections, not a raw chatbot transcript.
+- The email has a plain-text fallback or concise text summary when practical.
+- The report does not include unsupported claims when data is unavailable.
+
+## LINE Status Replies
+
+As a user, I want LINE to tell me whether my request was accepted or rejected, so that I know what happened after submitting.
+
+Acceptance criteria:
+
+- Valid requests receive a short accepted reply.
+- Invalid requests receive a short usage example.
+- If report generation or email delivery fails, the user receives a short failure message when possible.
+- Full reports are not sent in LINE for v1.
+
+## Abuse And Duplicate Control
+
+As an operator, I want duplicate and abusive requests controlled, so that users cannot accidentally or intentionally trigger excessive email sends.
+
+Acceptance criteria:
+
+- Duplicate LINE webhook events do not send duplicate emails.
+- Basic rate limits apply by LINE user ID and email address.
+- Delivery logs retain request status and SendGrid response details.
+- Blocked LINE users or blocked email addresses cannot create new report jobs.
+
+## Future Registered Access
+
+As an operator, I may later want registered-only access, so that the public LINE intake can become private or paid.
+
+Acceptance criteria:
+
+- The v1 design does not require full account registration.
+- The data model can later mark LINE users or emails as allowed, blocked, or subscribed.
+- Future invite-code or LINE Login linking can be added without changing the v1 request format.
 

@@ -2,64 +2,79 @@
 
 ## Goal
 
-Automatic reports should let active LINE users receive portfolio or stock updates without manually asking the chatbot.
+V1 reports should be generated from a constrained LINE request and delivered as AI-written HTML email through SendGrid.
 
 ## Report Pipeline
 
-1. A scheduler selects active `line_report_subscriptions`.
-2. A background worker loads the linked LINE user, portfolio, and report preferences.
-3. The worker generates report content through the existing chatbot/report service.
-4. A formatter converts the report into LINE-compatible messages.
-5. The LINE client sends push messages to the linked `line_user_id`.
-6. Delivery results are written to `line_delivery_logs`.
-7. Failures are retried or marked failed according to policy.
+1. LINE webhook creates a `stock_report_requests` row from valid stock-plus-email input.
+2. A background worker loads the request.
+3. The worker resolves the stock name or stock number.
+4. The worker gathers stock context and generates report content.
+5. AI writes an email subject and HTML body.
+6. SendGrid sends the report to the submitted email address.
+7. Delivery results are written to `email_delivery_logs`.
+8. Failures are retried or marked failed according to policy.
 
-## Message Format
+## Email Format
 
-Version 1 should use plain text summaries because that is the fastest reliable format.
+Version 1 should use HTML email because email is the desired report surface.
 
-Later versions can add:
+The email should include:
 
-- Flex Message report cards.
-- Quick replies for actions such as refresh, explain, or view portfolio.
-- Generated images for richer report snapshots.
-- Links to report artifacts when content is too long for LINE messages.
+- Clear subject line.
+- Requested stock name or stock number.
+- Summary section.
+- Business and theme notes.
+- Key risks or caveats.
+- Source/date context when available.
+- Plain-text fallback or concise summary when practical.
+
+SendGrid options:
+
+- Direct HTML content: fastest for v1.
+- Dynamic template with `dynamic_template_data`: cleaner after report layout stabilizes.
 
 ## First Report Type Recommendation
 
-Start with a daily portfolio summary if the user has a linked portfolio.
+Start with a single-stock report, because v1 input is only stock name or stock number plus email.
 
-Why:
+Possible sections:
 
-- It matches the current portfolio-aware backend.
-- It has clear user value.
-- It avoids needing a separate watchlist model first.
+- Company overview.
+- Theme or supply-chain relevance.
+- Recent business direction.
+- Basic valuation or financial health notes when data is available.
+- Risk notes.
+- AI-written summary.
 
-Possible report sections:
+## LINE Role In V1
 
-- Portfolio total value.
-- Cash percentage.
-- Top holdings.
-- Largest gain/loss notes when available.
-- Assistant-written summary.
-- Optional risk or action notes.
+LINE should only provide:
+
+- Input collection.
+- Invalid-format guidance.
+- Accepted status.
+- Failure status when useful and possible.
+
+The report itself should not be sent in LINE for v1.
 
 ## Long-Running Work
 
-LINE webhook handling should stay fast. If report generation may take longer than the reply window or normal webhook response expectations:
+LINE webhook handling should stay fast:
 
 - Acknowledge the webhook quickly.
 - Queue the report work.
-- Send the finished result later through LINE push.
+- Send the finished result later through SendGrid.
 
 ## Delivery Policy
 
 Delivery should be logged with:
 
-- Target LINE user.
-- Message type.
+- Report request ID.
+- Target email.
 - Request key or retry key.
 - Delivery status.
+- SendGrid message ID when available.
 - Error message when delivery fails.
 - Send timestamp.
 

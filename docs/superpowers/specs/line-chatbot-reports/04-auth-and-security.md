@@ -1,64 +1,63 @@
 # 04. Auth And Security
 
-## Access Model
+## V1 Access Model
 
-Only active, registered LINE users should be able to use chatbot or report features.
+For v1, the primary controls are constrained input, webhook verification, email validation, idempotency, and rate limiting.
 
 Every LINE webhook event should follow this rule:
 
 1. Verify the request came from LINE.
 2. Extract the LINE user ID from the webhook event source.
-3. Look up that LINE user in the backend registry.
-4. Allow chatbot/report work only when the user exists and has `status = active`.
-5. Deny, link, or ignore all other users.
+3. Parse only a stock name or stock number plus an email address.
+4. Reject everything else.
+5. Check duplicate events, blocked LINE users, blocked email addresses, and rate limits.
+6. Create a report job only after those checks pass.
 
-## Recommended Linking Approach
+## Registration Decision
 
-Start with invite-code linking.
+Do not require invite-code linking for v1 unless the product needs a private beta immediately.
 
-User flow:
+The v1 user flow is:
 
-1. Admin creates an invite code for a user or portfolio.
-2. User sends `link ABC123` to the LINE Official Account.
-3. Backend validates the invite code.
-4. Backend stores the `line_user_id`, internal app user or portfolio mapping, and active status.
-5. Backend marks the code as used.
+1. User sends `2330 user@example.com` or `台積電 user@example.com`.
+2. Backend stores the `line_user_id` for abuse prevention and request history.
+3. Backend stores the submitted email on the report request.
+4. Backend sends the generated HTML report to that email through SendGrid.
 
-This is better for the first private beta than full LINE Login or LIFF because it proves access control with less infrastructure.
+This keeps v1 small and avoids registration before the report concept is proven.
 
-## Alternatives
+## Future Access Options
 
-### Admin Pre-Registration
+### Open Constrained Intake
 
-Admin manually adds allowed LINE user IDs to the database.
+Any LINE user can submit only stock identifier plus email.
 
 Pros:
 
-- Very simple.
-- Good for internal testing.
-- Minimal user-facing flow.
+- Best for proving demand.
+- No account linking needed.
+- The constrained format limits chatbot abuse.
 
 Cons:
 
-- Admin must discover and enter LINE user IDs.
-- Poor fit for a beta with external users.
-- Does not give users a natural onboarding path.
+- Requires rate limits and email abuse controls.
+- Users can submit someone else's email unless verification is added.
+- Not enough for paid or private access.
 
 ### Invite-Code Linking
 
-User sends a one-time code in LINE to link the account.
+User sends a one-time code in LINE to unlock report requests.
 
 Pros:
 
 - Simple enough for a private beta.
 - Gives explicit access control.
 - Does not require full LINE Login or LIFF setup.
-- Works well with the existing backend.
 
 Cons:
 
 - Invite code management must be built.
-- Users must type a linking command.
+- Users must type a linking command before requesting a report.
 - Later consumer-scale onboarding may need a richer flow.
 
 ### LINE Login Or LIFF Linking
@@ -68,33 +67,39 @@ User logs in through LINE Login or a LIFF-based flow.
 Pros:
 
 - Best long-term user experience.
-- Stronger fit for a public product.
+- Stronger fit for a public or paid product.
 - Can integrate with an app account system.
 
 Cons:
 
 - More setup and frontend work.
-- Requires a clearer user account model than the project currently has.
+- Requires a clearer user account model than v1 needs.
 - Too large for the first proof of outcome.
 
 ## Security Requirements
 
 - Always verify `x-line-signature` before parsing or processing webhook content.
 - Never accept a claimed LINE user ID from a client request; use only the webhook event source.
-- Deny all chatbot/report requests unless `line_user.status == active`.
+- Do not expose open-ended chatbot prompts through LINE in v1.
+- Only accept messages matching the v1 stock-plus-email format.
+- Validate and normalize email addresses before creating report jobs.
+- Validate and normalize stock identifiers before report generation.
+- Store SendGrid API keys and sender configuration in environment variables.
 - Store LINE channel access token and channel secret in environment variables.
 - Do not log access tokens or full webhook payloads if they include sensitive user content.
-- Use one-time invite codes or hashed invite codes in storage.
+- Avoid logging full email report bodies unless needed for debugging.
 - Use webhook idempotency to avoid duplicate processing during LINE redelivery.
-- Keep portfolio mutation approval behavior; LINE chat should not bypass approval.
+- Apply rate limits by LINE user ID, email address, and stock identifier.
+- Support blocklists for abusive LINE users and email addresses.
 
 ## Error Handling
 
 - Invalid signature: return `403` and do not process the event.
 - Duplicate webhook event: return success without repeating side effects.
-- Unknown user: reply with linking instructions or deny access.
-- Blocked user: reply with access denied or stay silent, depending on product preference.
-- Chatbot failure: reply with a short failure message and log details server-side.
-- LINE delivery failure: record failed delivery and retry only when safe.
-- Long report generation: acknowledge the webhook quickly and send result later by push.
+- Invalid format: reply with one usage example.
+- Invalid email: reply with a short email-format error.
+- Unknown stock identifier: reply with a short stock-format error when detected early, or mark the job failed.
+- Blocked user or email: reply with access denied or stay silent, depending on product preference.
+- Report generation failure: record failure and reply in LINE if still possible.
+- SendGrid delivery failure: record failed delivery and retry only when safe.
 

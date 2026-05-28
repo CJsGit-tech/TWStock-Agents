@@ -4,34 +4,33 @@
 
 ### `line_users`
 
-Stores LINE identities that are allowed or pending.
+Stores LINE identities for request history, rate limits, and optional future access control.
 
 Fields:
 
 - `id`
 - `line_user_id`
-- `app_user_id`
-- `default_portfolio_id`
-- `status`: `pending`, `active`, or `blocked`
+- `status`: `active`, `blocked`, or `watch`
 - `created_at`
 - `updated_at`
 - `last_seen_at`
 
-### `line_invite_codes`
+### `stock_report_requests`
 
-Stores one-time or limited-use invite codes.
+Stores each v1 report request submitted through LINE.
 
 Fields:
 
 - `id`
-- `code_hash`
-- `app_user_id`
-- `default_portfolio_id`
-- `status`: `active`, `used`, `expired`, or `revoked`
-- `expires_at`
-- `used_by_line_user_id`
-- `used_at`
+- `line_user_id`
+- `stock_identifier`
+- `normalized_stock_id`
+- `email`
+- `status`: `accepted`, `generating`, `sent`, `failed`, or `rejected`
+- `failure_reason`
 - `created_at`
+- `updated_at`
+- `completed_at`
 
 ### `line_webhook_events`
 
@@ -47,33 +46,30 @@ Fields:
 - `processed_at`
 - `status`
 
-### `line_report_subscriptions`
+### `blocked_email_addresses`
 
-Stores report delivery preferences.
+Stores email addresses that cannot receive reports.
 
 Fields:
 
 - `id`
-- `line_user_id`
-- `portfolio_id`
-- `report_type`
-- `schedule`
-- `timezone`
-- `status`: `active`, `paused`, or `cancelled`
+- `email`
+- `reason`
 - `created_at`
-- `updated_at`
 
-### `line_delivery_logs`
+### `email_delivery_logs`
 
-Stores reply and push delivery attempts.
+Stores SendGrid delivery attempts.
 
 Fields:
 
 - `id`
-- `line_user_id`
-- `message_type`
+- `report_request_id`
+- `email`
+- `provider`: `sendgrid`
 - `request_key`
 - `status`
+- `provider_message_id`
 - `error_message`
 - `created_at`
 - `sent_at`
@@ -83,23 +79,26 @@ Fields:
 - `backend/api/line.py`: FastAPI router for LINE webhooks and admin/test endpoints.
 - `backend/line/config.py`: LINE channel secret, access token, and feature flags.
 - `backend/line/security.py`: signature verification.
-- `backend/line/client.py`: reply, push, multicast, and loading-indicator calls.
+- `backend/line/client.py`: LINE status replies.
 - `backend/line/schemas.py`: internal event and message models.
-- `backend/line/service.py`: event handling, user lookup, linking, and routing.
-- `backend/line/reports.py`: report command handling and report delivery helpers.
-- `backend/line/models.py`: SQLAlchemy tables for LINE users, invite codes, events, subscriptions, and delivery logs.
+- `backend/line/service.py`: event handling, v1 input parsing, request creation, and status replies.
+- `backend/line/models.py`: SQLAlchemy tables for LINE users, webhook events, report requests, and blocklists.
+- `backend/reports/service.py`: stock report generation orchestration.
+- `backend/reports/email_writer.py`: AI subject and HTML body generation.
+- `backend/email/sendgrid_client.py`: SendGrid Mail Send API integration.
+- `backend/email/models.py`: email delivery logs.
 
 ## Suggested Endpoints
 
 - `POST /api/line/webhook`: public LINE webhook endpoint.
-- `POST /api/line/invite-codes`: admin endpoint to create invite codes.
-- `GET /api/line/users`: admin endpoint to inspect linked users.
-- `POST /api/line/users/{id}/block`: admin endpoint to revoke access.
-- `POST /api/line/reports/test-send`: internal/admin endpoint to test a report send.
+- `GET /api/line/report-requests`: admin endpoint to inspect report requests.
+- `POST /api/line/users/{id}/block`: admin endpoint to block a LINE user.
+- `POST /api/email/test-send`: internal/admin endpoint to test SendGrid delivery.
+- `POST /api/reports/stock/test-generate`: internal/admin endpoint to test report generation.
 
 ## Backend Contract Note
 
-The LINE integration should not replace `/api/chatbot/stream`. It should call the same underlying chatbot service and adapt the streaming output into LINE-compatible messages.
+The LINE integration should not replace `/api/chatbot/stream`. For v1, it also should not expose `/api/chatbot/stream` directly to LINE users.
 
-This keeps the web client and LINE client as separate delivery channels over the same backend intelligence.
+Instead, LINE should create constrained stock report requests. The report worker can reuse the same OpenAI configuration and relevant stock-analysis helpers behind a narrower report-generation service.
 

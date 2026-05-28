@@ -2,7 +2,7 @@
 
 ## What Already Exists
 
-The project already has the main backend pieces needed behind the LINE adapter:
+The project already has backend pieces that can support report generation:
 
 - `backend/app.py` creates the FastAPI app and mounts the current API routers.
 - `backend/api/chatbot.py` exposes `POST /api/chatbot/stream`.
@@ -11,43 +11,42 @@ The project already has the main backend pieces needed behind the LINE adapter:
 - `backend/chatbot/approvals.py` supports human approval before applying portfolio mutations.
 - `docs/API_EXAMPLES.md` documents the current chatbot and portfolio API shape.
 
-## Main Integration Mismatch
+## V1 Fit
 
-The current chatbot API streams NDJSON to a web client. LINE webhooks are request/response events, and LINE messages are sent through reply or push APIs.
+The current chatbot API streams NDJSON to a web client. V1 should not expose that open-ended chat interface to LINE.
 
-A LINE integration should consume the backend stream internally, collect the final `message_completed` content, and send that final content to LINE.
+LINE should only collect:
 
-For longer report generation, the webhook should acknowledge quickly, run the report in the background, then send the finished result later through LINE push messages.
+- stock name or stock number
+- email address
+
+The backend should then generate the report asynchronously and send the result through SendGrid as HTML email.
 
 ## What Is Missing
 
-The project does not yet have these pieces:
+The project does not yet have:
 
 - LINE webhook endpoint, such as `POST /api/line/webhook`.
 - LINE channel configuration: channel secret and channel access token.
 - LINE request signature verification using the `x-line-signature` header.
-- LINE event parser for text messages, postbacks, follow events, and delivery edge cases.
-- LINE user registry that maps `line_user_id` to an app user, portfolio, and access status.
-- Account linking flow, preferably invite-code based for the first private beta.
-- LINE reply/push client for sending messages back to users.
-- Adapter that converts LINE text events into the existing chatbot request format.
-- Adapter that converts chatbot output into LINE text, Flex Messages, or report images.
-- Background job or scheduler layer for automatic reports.
-- Idempotency handling for webhook redelivery and push retries.
-- Delivery logs for report sends, failures, and retries.
-- Tests for webhook auth, user authorization, event parsing, chatbot adapter behavior, and push delivery.
+- Parser for the v1 message format: `<stock name or stock number> <email>`.
+- Email validation and stock identifier validation.
+- Report request persistence with status tracking.
+- Report generation service focused on single-stock reports.
+- AI email writer that produces subject line and HTML body.
+- SendGrid configuration: API key, verified sender, optional template ID.
+- SendGrid client for sending HTML emails.
+- LINE reply client for short status messages only.
+- Background job layer for report generation and email sending.
+- Idempotency handling for LINE webhook redelivery.
+- Rate limits and blocklists for abuse control.
+- Delivery logs for SendGrid sends, failures, and retries.
 
-## LINE Capabilities To Use
+## External Capabilities To Use
 
-LINE Messaging API supports:
+LINE Messaging API supports webhooks, reply messages, text messages, and webhook signature verification.
 
-- Webhooks for receiving user messages and account events.
-- Reply messages for responding to a specific webhook event.
-- Push messages for sending messages later to a known LINE user.
-- Multicast or narrowcast style delivery for sending to multiple users, if needed later.
-- Text messages, template messages, image messages, quick replies, and Flex Messages.
-- Webhook signature verification with the channel secret.
-- Retry/idempotency controls for delivery requests.
+SendGrid supports HTML email delivery through its Mail Send API, dynamic templates, and personalization fields. For v1, direct AI-generated HTML is the fastest path. A SendGrid dynamic template is cleaner once the report layout stabilizes.
 
 Useful official references:
 
@@ -55,6 +54,7 @@ Useful official references:
 - Receiving messages: https://developers.line.biz/en/docs/messaging-api/receiving-messages/
 - Sending messages: https://developers.line.biz/en/docs/messaging-api/sending-messages/
 - Verify webhook signature: https://developers.line.biz/en/docs/messaging-api/verify-webhook-signature/
-- Message types: https://developers.line.biz/en/docs/messaging-api/message-types/
-- Quick replies: https://developers.line.biz/en/docs/messaging-api/using-quick-reply/
+- SendGrid Email API: https://sendgrid.com/en-us/solutions/email-api
+- SendGrid personalizations: https://www.twilio.com/docs/sendgrid/for-developers/sending-email/personalizations/
+- SendGrid dynamic templates: https://sendgrid.com/en-us/solutions/email-api/dynamic-email-templates
 
